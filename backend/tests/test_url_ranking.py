@@ -11,6 +11,7 @@ asserts rather than how.
 import inspect
 import json
 import random
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -790,6 +791,43 @@ def test_dropped_keys_are_in_the_documented_pipeline_order() -> None:
 
     seen_in_order = [rule for rule in pipeline_order if rule in result.dropped]
     assert list(result.dropped.keys()) == seen_in_order
+
+
+def test_rule_order_is_pinned() -> None:
+    """`_RULE_ORDER` is the canonical order `dropped`'s keys appear in when this function
+    builds them (`test_dropped_keys_are_in_the_documented_pipeline_order` above) — and, once
+    PER-196's `runs.stats["dropped"]` has been through `jsonb`, the ONLY place that order still
+    exists at all, since Postgres does not preserve a stored object's key order. Two other
+    files render this exact tuple and have to stay in step with it by hand rather than by
+    import: `frontend/lib/crawls/provenance-copy.ts`'s `SELECTION_RULE_ORDER` (what the
+    provenance panel renders in) and `app/docs/(run)/page.mdx`'s Selection section (the same
+    twelve rules, in the same order, in prose). A thirteenth rule has to touch this tuple AND
+    both of those; this test is what makes forgetting either one visible here, before either
+    file goes stale."""
+    assert url_ranking._RULE_ORDER == (
+        "unparseable",
+        "duplicate",
+        "seed",
+        "off_origin",
+        "robots_disallowed",
+        "dated_archive",
+        "taxonomy",
+        "pagination",
+        "feed",
+        "changelog",
+        "localized_duplicate",
+        "over_limit",
+    )
+
+
+def test_every_rule_key_is_a_bare_snake_case_identifier() -> None:
+    """The executable form of the `[Backend] No English rule labels` acceptance criterion
+    (PER-196): every key `dropped` can carry is a bare, lowercase, snake_case identifier —
+    never a sentence, a label, or anything a human reads directly. The human phrasing lives in
+    `frontend/lib/crawls/provenance-copy.ts`, matched to `/docs#selection`; this module emits
+    only the keys."""
+    for rule in url_ranking._RULE_ORDER:
+        assert re.fullmatch(r"[a-z][a-z_]*", rule), rule
 
 
 # --- Fixture ---------------------------------------------------------------------------------

@@ -145,7 +145,7 @@ async def test_success_writes_a_completed_row_with_artifact_storage_path_and_sta
     assert row["completed_at"] is not None
 
     stats = json.loads(row["stats"])
-    assert stats["version"] == 8
+    assert stats["version"] == 9
     assert stats["pages_crawled"] == 1
     assert "cap_hit" in stats
     assert stats["pages_empty_content"] == 1, "the ok_handler's body has no extractable content"
@@ -418,7 +418,7 @@ async def test_partial_stats_survive_an_upload_failure(websites_db: Pool) -> Non
     assert row is not None
     stats = json.loads(row["stats"])
     assert stats["pages_crawled"] == 1
-    assert stats["version"] == 8
+    assert stats["version"] == 9
     # A failure row carries the same KEYS as a success row, at their hoisted defaults — the
     # shape `runs.stats` stores must not depend on how far a run got before it failed. The
     # four PER-180 counters are part of that same guarantee now: this suite's `_execute`
@@ -438,6 +438,11 @@ async def test_partial_stats_survive_an_upload_failure(websites_db: Pool) -> Non
     # a freshly seeded website, so the diff has nothing to compare against.
     assert stats["llms_txt_bytes"] > 0
     assert stats["index_diff"] == {"state": "first_run", "previous_run_completed": None}
+    # PER-196's own hoisted default: `_ok_handler` serves plain text for every path, including
+    # `/sitemap.xml`, so discovery finds nothing to rank and `dropped` never moves off its
+    # hoisted `{}` — present as a real recorded value, same as every other key on this row.
+    assert "dropped" in stats
+    assert stats["dropped"] == {}
 
 
 @pytest.mark.parametrize(
@@ -911,6 +916,51 @@ async def test_discovery_counters_and_the_selected_frontier_land_in_the_stored_s
     assert stats["pages_crawled"] == 4
 
 
+async def test_the_selection_drop_breakdown_lands_in_the_stored_stats(websites_db: Pool) -> None:
+    """[Backend] `SelectionResult.dropped` persisted into `runs.stats` as `dropped` (PER-196),
+    end to end against a real sitemap-derived frontier that trips several distinct rules —
+    `dated_archive` and `taxonomy`, alongside two ordinary pages that survive.
+
+    Asserted by dict equality only, never key order: `dropped` has already been through the
+    `runs.stats` jsonb column by the time this test reads it back, and jsonb does not preserve
+    an object's key order (`RUN_STATS_VERSION`'s version-9 paragraph). The reconciliation
+    invariant is checked the same way a live row is the only place it can be — against what
+    actually landed in Postgres, not against `select_urls`' in-memory return value.
+    """
+    _website_id, run_id = await _seed_pending_clean_origin(websites_db, "drop-breakdown")
+    storage = FakeStorage()
+
+    sitemap_body = f"""<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>http://{_SEED_IP}/drop-breakdown/page-1</loc></url>
+  <url><loc>http://{_SEED_IP}/drop-breakdown/page-2</loc></url>
+  <url><loc>http://{_SEED_IP}/drop-breakdown/2019/hello</loc></url>
+  <url><loc>http://{_SEED_IP}/drop-breakdown/tag/release-notes</loc></url>
+</urlset>"""
+    dropped_paths = ("/drop-breakdown/2019/hello", "/drop-breakdown/tag/release-notes")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/sitemap.xml":
+            return httpx.Response(
+                200, text=sitemap_body, headers={"Content-Type": "application/xml"}
+            )
+        if request.url.path in dropped_paths:
+            raise AssertionError(f"select_urls should have dropped {request.url.path}")
+        return httpx.Response(200, text="hello world")
+
+    outcome = await _execute(websites_db, storage, run_id, handler)
+    assert outcome is not None
+
+    row = await websites_db.fetchrow("SELECT status, stats FROM runs WHERE id = $1", run_id)
+    assert row is not None
+    assert row["status"] == "completed"
+    stats = json.loads(row["stats"])
+    assert stats["urls_discovered"] == 4
+    assert stats["urls_selected"] == 2
+    assert stats["dropped"] == {"dated_archive": 1, "taxonomy": 1}
+    assert stats["urls_discovered"] - sum(stats["dropped"].values()) == stats["urls_selected"]
+
+
 # -----------------------------------------------------------------------------------------
 # PER-178: the depth-1 link-extraction fallback, wired into `execute_run` behind sitemap
 # discovery. Each test below drives the real `extract_links` -> `select_urls` -> `crawl_site`
@@ -982,12 +1032,12 @@ async def test_a_site_with_no_sitemap_falls_back_to_the_links_on_its_seed_page(
     assert stats["urls_discovered"] == 3, "off-origin, mailto: and fragment-only never count"
     assert stats["urls_selected"] == 3
     assert stats["pages_crawled"] == 4
-    assert stats["version"] == 8, (
+    assert stats["version"] == 9, (
         "a new VALUE for an existing key is still not a new shape — PER-178 added "
-        '`discovery_source: "links"` and deliberately did not bump for it. This row reads 8 '
-        "because PER-180, PER-191, PER-193, and PER-194 each added new KEYS after that, which "
-        "are shape changes; the number moved for reasons that have nothing to do with the "
-        "value asserted above."
+        '`discovery_source: "links"` and deliberately did not bump for it. This row reads 9 '
+        "because PER-180, PER-191, PER-193, PER-194, and PER-196 each added new KEYS after "
+        "that, which are shape changes; the number moved for reasons that have nothing to do "
+        "with the value asserted above."
     )
 
 
@@ -1068,6 +1118,10 @@ async def test_a_sitemap_whose_urls_ranking_drops_does_not_fall_back_to_links(
     assert stats["urls_discovered"] == 1
     assert stats["urls_selected"] == 0
     assert stats["pages_crawled"] == 1
+    # The mirror of `test_the_link_fallbacks...` below: proving the SITEMAP path's own
+    # `dropped` map is not clobbered by a fallback that never ran (the fallback is only armed
+    # when discovery finds nothing, and this sitemap found one URL).
+    assert stats["dropped"] == {"taxonomy": 1}
 
 
 async def test_extracted_links_are_ranked_by_select_urls_before_anything_is_fetched(
@@ -1112,6 +1166,11 @@ async def test_extracted_links_are_ranked_by_select_urls_before_anything_is_fetc
     assert stats["urls_discovered"] == 6
     assert stats["urls_selected"] == 2
     assert stats["pages_crawled"] == 3
+    # This is the test that proves `CrawlService.execute_run`'s link-fallback overwrite block
+    # (`service.py`) was updated alongside `urls_discovered`/`urls_selected`/
+    # `urls_robots_disallowed` — without it, this run's row would silently persist the
+    # sitemap call's `{}` instead of the fallback's own breakdown.
+    assert stats["dropped"] == {"taxonomy": 1, "dated_archive": 1, "feed": 1, "changelog": 1}
 
 
 async def test_a_link_derived_frontier_respects_crawl_max_pages(websites_db: Pool) -> None:
@@ -1177,8 +1236,8 @@ async def test_a_failed_seed_reports_no_discovery_source_even_with_the_fallback_
     websites_db: Pool,
 ) -> None:
     """The fallback needs a fetched seed page to read, so a run whose seed never landed never
-    reaches it — and the hoisted `"none"`/0/0 defaults in `execute_run` fall straight through
-    into the failure row's partial stats, with no extra plumbing."""
+    reaches it — and the hoisted `"none"`/0/0/`{}` defaults in `execute_run` fall straight
+    through into the failure row's partial stats, with no extra plumbing."""
     _website_id, run_id = await _seed_pending_clean_origin(websites_db, "dead-seed")
     storage = FakeStorage()
 
@@ -1197,6 +1256,8 @@ async def test_a_failed_seed_reports_no_discovery_source_even_with_the_fallback_
     assert stats["discovery_source"] == "none"
     assert stats["urls_discovered"] == 0
     assert stats["pages_crawled"] == 0
+    assert "dropped" in stats
+    assert stats["dropped"] == {}
 
 
 async def test_links_found_but_all_ranked_away_still_report_the_links_source(
@@ -1348,7 +1409,7 @@ async def test_model_titles_reach_llms_txt_and_the_extracted_title_does_not(
     assert "Extracted Title Nobody Should See In The Artifact" not in row["llms_txt"]
 
     stats = json.loads(row["stats"])
-    assert stats["version"] == 8
+    assert stats["version"] == 9
     assert stats["pages_enriched"] == 1
     assert stats["enrich_failures"] == 0
 
@@ -2047,11 +2108,11 @@ async def test_an_unreadable_robots_txt_completes_the_run(websites_db: Pool) -> 
     assert stats["crawl_delay_ms"] == settings.crawl_politeness_delay_ms
 
 
-async def test_stats_version_is_eight(websites_db: Pool) -> None:
-    """[Observability]. A live row lands with `RUN_STATS_VERSION` 8 — the persistence-layer
+async def test_stats_version_is_nine(websites_db: Pool) -> None:
+    """[Observability]. A live row lands with `RUN_STATS_VERSION` 9 — the persistence-layer
     companion to `tests/test_run_stats.py::test_run_stats_version_is_pinned`, which only
     checks the constant itself."""
-    _website_id, run_id = await _seed_pending_clean_origin(websites_db, "version-eight")
+    _website_id, run_id = await _seed_pending_clean_origin(websites_db, "version-nine")
     storage = FakeStorage()
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -2065,4 +2126,4 @@ async def test_stats_version_is_eight(websites_db: Pool) -> None:
     row = await websites_db.fetchrow("SELECT stats FROM runs WHERE id = $1", run_id)
     assert row is not None
     stats = json.loads(row["stats"])
-    assert stats["version"] == 8
+    assert stats["version"] == 9

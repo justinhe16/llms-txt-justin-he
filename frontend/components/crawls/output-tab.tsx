@@ -11,12 +11,13 @@ import {
   DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import type { RunListItem } from "@/lib/api/runs";
+import type { RunDetail, RunListItem } from "@/lib/api/runs";
 import { isActiveRunStatus } from "@/lib/api/run-status";
 import { useRun } from "@/lib/query/use-run";
 import { rowStatusFromRunStatus } from "@/lib/crawls/row-status";
 import { selectRunToShow } from "@/lib/crawls/select-run";
 
+import { CrawlProvenance } from "./crawl-provenance";
 import { CrawlsError } from "./crawls-error";
 import { DownloadFullButton } from "./download-full-button";
 import { LlmsTxtViewer } from "./llms-txt-viewer";
@@ -187,11 +188,19 @@ function RunPicker({
 }
 
 /**
- * One run's artifact — the only place `GET /runs/{id}` is called.
+ * One run's artifact, plus — for every run past the active/in-flight state — the provenance
+ * panel underneath it. The only place `GET /runs/{id}` is called.
  *
  * `useRun` polls this on its own while the run is active (`runIsActive`), so a run watched
  * from `pending` through `processing` to `completed` fills in its viewer without the user
  * doing anything, and the polling stops by itself the moment it lands.
+ *
+ * `CrawlProvenance` (PER-196) renders for the three TERMINAL branches `RunArtifact` below
+ * handles — failed, completed-without-an-artifact, and success — never for `isPending`,
+ * `isError`, or the still-active branch: an in-flight run has no stats yet to describe, and a
+ * skeleton followed by a provenance panel would claim otherwise. `!isActiveRunStatus(run.status)`
+ * is the single predicate for "terminal" here, the same one `RunArtifact`'s own first branch
+ * already reads `run.status` against.
  */
 function RunOutput({ runId, origin }: { runId: string; origin: string }) {
   const { data: run, isPending, isError, error } = useRun(runId);
@@ -206,6 +215,30 @@ function RunOutput({ runId, origin }: { runId: string; origin: string }) {
     );
   }
 
+  return (
+    <>
+      <RunArtifact run={run} runId={runId} origin={origin} />
+      {/* A fragment is correct here — these become direct children of `OutputTab`'s own
+          `<div className="min-w-0 space-y-4">`, so its existing spacing applies with no new
+          wrapper needed. */}
+      {!isActiveRunStatus(run.status) && <CrawlProvenance run={run} />}
+    </>
+  );
+}
+
+/**
+ * The artifact viewer for one run, in whichever of its four possible shapes `run.status` (and
+ * whether it actually has an `llms_txt`) puts it in.
+ */
+function RunArtifact({
+  run,
+  runId,
+  origin,
+}: {
+  run: RunDetail;
+  runId: string;
+  origin: string;
+}) {
   // State 2 of 4: the run is still going. A skeleton plus a live status, rather than an
   // empty viewer — there is genuinely no artifact yet, and saying so is more useful than
   // rendering zero lines as though that were the result.

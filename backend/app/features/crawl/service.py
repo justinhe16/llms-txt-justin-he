@@ -501,6 +501,10 @@ class CrawlService:
         # operator's own configured floor, which is exactly the answer for a run that never
         # got as far as reading a `robots.txt` at all.
         urls_robots_disallowed = 0
+        # PER-196's own hoisted local, sharing the same reasoning and the same block: `{}` is
+        # the recorded value for a run that never got as far as selecting anything, exactly as
+        # `urls_robots_disallowed: 0` is.
+        dropped: dict[str, int] = {}
         crawl_delay_ms = self._settings.crawl_politeness_delay_ms
         robots: RobotsRules = ALLOW_ALL
         # Set by the failure paths below when the attempt should be retried, and raised
@@ -577,6 +581,7 @@ class CrawlService:
             urls_discovered = len(discovery.urls)
             urls_selected = len(selection.selected)
             urls_robots_disallowed = selection.dropped.get("robots_disallowed", 0)
+            dropped = selection.dropped
 
             # THE DEPTH-1 LINK FALLBACK (PER-178), and its one trigger condition.
             #
@@ -629,6 +634,7 @@ class CrawlService:
                 urls_discovered = link_selection.discovered_count
                 urls_selected = len(link_selection.selected)
                 urls_robots_disallowed = link_selection.dropped.get("robots_disallowed", 0)
+                dropped = link_selection.dropped
 
             if result.seed_error is not None:
                 # WARNING, not ERROR, and a message of its own: a site that is down is an
@@ -661,6 +667,7 @@ class CrawlService:
                         urls_discovered=urls_discovered,
                         urls_selected=urls_selected,
                         urls_robots_disallowed=urls_robots_disallowed,
+                        dropped=dropped,
                         crawl_delay_ms=crawl_delay_ms,
                         pages_enriched=pages_enriched,
                         enrich_failures=enrich_failures,
@@ -831,6 +838,7 @@ class CrawlService:
                     urls_discovered=urls_discovered,
                     urls_selected=urls_selected,
                     urls_robots_disallowed=urls_robots_disallowed,
+                    dropped=dropped,
                     crawl_delay_ms=crawl_delay_ms,
                     pages_enriched=pages_enriched,
                     enrich_failures=enrich_failures,
@@ -889,6 +897,7 @@ class CrawlService:
                     urls_discovered=urls_discovered,
                     urls_selected=urls_selected,
                     urls_robots_disallowed=urls_robots_disallowed,
+                    dropped=dropped,
                     crawl_delay_ms=crawl_delay_ms,
                     pages_enriched=pages_enriched,
                     enrich_failures=enrich_failures,

@@ -18,26 +18,28 @@ def test_run_stats_version_is_pinned() -> None:
     bumped it a third time, from 7 to 8, when `enrich_requested`, `enrich_applied`,
     `enrich_unavailable_reason`, and `content_hashes` joined the shape — the per-website
     enrichment opt-in's request/outcome, and the body-fingerprint side-channel the retrofit
-    diff joins against. See `RUN_STATS_VERSION`'s own docstring for the full history, including
-    why every one of those eight keys is a real, recorded value on every row from the version
-    that added it onward — `llms_txt_bytes: 0`, `index_diff: None`, and
-    `enrich_unavailable_reason: None` included — rather than an absent key or "not yet
-    computed."
+    diff joins against. PER-196 bumped it a fourth time, from 8 to 9, when `dropped` joined the
+    shape — the per-rule selection breakdown (`SelectionResult.dropped`) the Output tab's
+    provenance panel renders. See `RUN_STATS_VERSION`'s own docstring for the full history,
+    including why every one of those nine keys is a real, recorded value on every row from the
+    version that added it onward — `llms_txt_bytes: 0`, `index_diff: None`,
+    `enrich_unavailable_reason: None`, and `dropped: {}` included — rather than an absent key
+    or "not yet computed."
 
     Pinned here, directly, so a future change to the persisted shape has to bump this constant
     deliberately rather than by accident: `tests/test_run_persistence.py` only checks the
     version NUMBER a live row lands with, which would pass just as happily against a
     `RUN_STATS_VERSION` that was bumped again without anyone noticing this test existed."""
-    assert RUN_STATS_VERSION == 8
+    assert RUN_STATS_VERSION == 9
 
 
-def test_build_run_stats_passes_crawl_stats_through_unchanged_and_adds_eighteen_keys() -> None:
+def test_build_run_stats_passes_crawl_stats_through_unchanged_and_adds_nineteen_keys() -> None:
     """`crawl_stats` — including `pages_empty_content` — is spread into the result verbatim;
     `links_emitted`, `full_txt_truncated`, `discovery_source`, `urls_discovered`,
-    `urls_selected`, `urls_robots_disallowed`, `crawl_delay_ms`, `pages_enriched`,
+    `urls_selected`, `urls_robots_disallowed`, `dropped`, `crawl_delay_ms`, `pages_enriched`,
     `enrich_failures`, `enrich_input_tokens`, `enrich_output_tokens`, `llms_txt_bytes`,
     `index_diff`, `enrich_requested`, `enrich_applied`, `enrich_unavailable_reason`,
-    `content_hashes`, and `version` are the only eighteen keys `build_run_stats` itself
+    `content_hashes`, and `version` are the only nineteen keys `build_run_stats` itself
     contributes."""
     crawl_stats = {
         "pages_crawled": 3,
@@ -56,6 +58,7 @@ def test_build_run_stats_passes_crawl_stats_through_unchanged_and_adds_eighteen_
         urls_discovered=5,
         urls_selected=3,
         urls_robots_disallowed=1,
+        dropped={"taxonomy": 1, "over_limit": 1},
         crawl_delay_ms=200,
         pages_enriched=1,
         enrich_failures=0,
@@ -77,6 +80,7 @@ def test_build_run_stats_passes_crawl_stats_through_unchanged_and_adds_eighteen_
         "urls_discovered": 5,
         "urls_selected": 3,
         "urls_robots_disallowed": 1,
+        "dropped": {"taxonomy": 1, "over_limit": 1},
         "crawl_delay_ms": 200,
         "pages_enriched": 1,
         "enrich_failures": 0,
@@ -108,6 +112,7 @@ def test_index_diff_is_none_and_llms_txt_bytes_zero_on_a_failure_shaped_call() -
         urls_discovered=0,
         urls_selected=0,
         urls_robots_disallowed=0,
+        dropped={},
         crawl_delay_ms=200,
         pages_enriched=0,
         enrich_failures=0,
@@ -128,6 +133,39 @@ def test_index_diff_is_none_and_llms_txt_bytes_zero_on_a_failure_shaped_call() -
     assert stats["content_hashes"] == {}
 
 
+def test_dropped_is_an_empty_map_on_a_failure_shaped_call() -> None:
+    """Mirrors `test_index_diff_is_none_and_llms_txt_bytes_zero_on_a_failure_shaped_call`
+    above, for the one PER-196 key: `{}` is present and real on a failure-shaped call, not an
+    absent key standing in for "unknown" — the same "0 is data" rule `RUN_STATS_VERSION`'s
+    version-9 paragraph states for `dropped` explicitly."""
+    crawl_stats = {"pages_crawled": 0, "pages_empty_content": 0}
+
+    stats = build_run_stats(
+        crawl_stats,
+        links_emitted=0,
+        full_txt_truncated=0,
+        discovery_source="none",
+        urls_discovered=0,
+        urls_selected=0,
+        urls_robots_disallowed=0,
+        dropped={},
+        crawl_delay_ms=200,
+        pages_enriched=0,
+        enrich_failures=0,
+        enrich_input_tokens=0,
+        enrich_output_tokens=0,
+        llms_txt_bytes=0,
+        index_diff=None,
+        enrich_requested=False,
+        enrich_applied=False,
+        enrich_unavailable_reason=None,
+        content_hashes={},
+    )
+
+    assert "dropped" in stats
+    assert stats["dropped"] == {}
+
+
 def test_links_emitted_is_recorded_as_passed_even_when_it_differs_from_pages_crawled() -> None:
     """The version-3 divergence, pinned at this layer: `build_run_stats` records what the
     artifact reported and never reconciles it against `pages_crawled`. A run that fetched three
@@ -144,6 +182,7 @@ def test_links_emitted_is_recorded_as_passed_even_when_it_differs_from_pages_cra
         urls_discovered=9,
         urls_selected=2,
         urls_robots_disallowed=0,
+        dropped={"taxonomy": 7},
         crawl_delay_ms=200,
         pages_enriched=0,
         enrich_failures=0,
@@ -163,13 +202,13 @@ def test_links_emitted_is_recorded_as_passed_even_when_it_differs_from_pages_cra
 
 def test_build_run_stats_leaves_the_crawl_loops_own_keys_intact() -> None:
     """Every key `crawl_stats` arrived with survives into the result with its original value,
-    alongside the eighteen this module contributes.
+    alongside the nineteen this module contributes.
 
     Deliberately NOT a collision test. `build_run_stats` spreads `{**crawl_stats, ...}`, so a
-    `crawl_stats` that already carried one of the eighteen contributed keys would have that
+    `crawl_stats` that already carried one of the nineteen contributed keys would have that
     value OVERWRITTEN, not preserved — asserting otherwise here would be asserting the
     opposite of what the code does. The real guarantee, as `build_run_stats`' own docstring
-    states, is that none of the eighteen is a key `CrawlResult.stats` has ever produced, which
+    states, is that none of the nineteen is a key `CrawlResult.stats` has ever produced, which
     is a property of `internals/crawler.py` rather than of this function;
     `tests/test_crawler_caps.py` is where that side of it is pinned down."""
     crawl_stats = {"pages_crawled": 1, "pages_empty_content": 0}
@@ -182,6 +221,7 @@ def test_build_run_stats_leaves_the_crawl_loops_own_keys_intact() -> None:
         urls_discovered=0,
         urls_selected=0,
         urls_robots_disallowed=0,
+        dropped={},
         crawl_delay_ms=200,
         pages_enriched=1,
         enrich_failures=1,
@@ -219,7 +259,7 @@ def test_build_run_stats_leaves_the_crawl_loops_own_keys_intact() -> None:
 
 def test_build_run_stats_carries_the_discovery_counters() -> None:
     """The three PER-176 keys land with exactly the values passed in — a narrower,
-    single-purpose companion to the "adds eighteen keys" test above, named for the acceptance
+    single-purpose companion to the "adds nineteen keys" test above, named for the acceptance
     criterion it pins rather than for the mechanics of the dict spread.
 
     `urls_discovered` (7) and `urls_selected` (3) are deliberately unequal to each other and
@@ -237,6 +277,7 @@ def test_build_run_stats_carries_the_discovery_counters() -> None:
         urls_discovered=7,
         urls_selected=3,
         urls_robots_disallowed=0,
+        dropped={},
         crawl_delay_ms=200,
         pages_enriched=0,
         enrich_failures=0,
@@ -255,6 +296,40 @@ def test_build_run_stats_carries_the_discovery_counters() -> None:
     assert stats["urls_selected"] == 3
 
 
+def test_build_run_stats_carries_the_selection_drop_breakdown() -> None:
+    """The PER-196 key lands passed through byte-identically — same keys, same counts, and
+    (this is the pure layer, where the caller's own order is real, unlike the jsonb column it
+    eventually lands in) the same key ORDER `select_urls` produced it in. `build_run_stats`
+    does not sort, re-key, or otherwise touch this map; it only carries it."""
+    crawl_stats = {"pages_crawled": 2, "pages_empty_content": 0}
+
+    dropped = {"dated_archive": 4, "taxonomy": 2, "over_limit": 9}
+    stats = build_run_stats(
+        crawl_stats,
+        links_emitted=2,
+        full_txt_truncated=0,
+        discovery_source="sitemap",
+        urls_discovered=17,
+        urls_selected=2,
+        urls_robots_disallowed=0,
+        dropped=dropped,
+        crawl_delay_ms=200,
+        pages_enriched=0,
+        enrich_failures=0,
+        enrich_input_tokens=0,
+        enrich_output_tokens=0,
+        llms_txt_bytes=128,
+        index_diff=None,
+        enrich_requested=False,
+        enrich_applied=False,
+        enrich_unavailable_reason=None,
+        content_hashes={},
+    )
+
+    assert stats["dropped"] == dropped
+    assert list(stats["dropped"].keys()) == list(dropped.keys())
+
+
 def test_build_run_stats_carries_the_enrichment_counters() -> None:
     """The four PER-180 keys land with exactly the values passed in — the enrichment-layer
     counterpart to `test_build_run_stats_carries_the_discovery_counters` above. `pages_enriched`
@@ -271,6 +346,7 @@ def test_build_run_stats_carries_the_enrichment_counters() -> None:
         urls_discovered=0,
         urls_selected=0,
         urls_robots_disallowed=0,
+        dropped={},
         crawl_delay_ms=200,
         pages_enriched=7,
         enrich_failures=2,
@@ -305,6 +381,7 @@ def test_build_run_stats_carries_the_robots_counters() -> None:
         urls_discovered=10,
         urls_selected=6,
         urls_robots_disallowed=2,
+        dropped={"robots_disallowed": 2},
         crawl_delay_ms=5000,
         pages_enriched=0,
         enrich_failures=0,
@@ -323,7 +400,7 @@ def test_build_run_stats_carries_the_robots_counters() -> None:
 
 
 def _base_kwargs() -> dict:
-    """The seventeen non-intent kwargs `build_run_stats` needs, held fixed across the four
+    """The eighteen non-intent kwargs `build_run_stats` needs, held fixed across the four
     cases `test_build_run_stats_carries_the_enrichment_intent_keys` parametrizes over, so only
     the intent-related arguments vary between them."""
     return {
@@ -333,6 +410,7 @@ def _base_kwargs() -> dict:
         "urls_discovered": 5,
         "urls_selected": 5,
         "urls_robots_disallowed": 0,
+        "dropped": {},
         "crawl_delay_ms": 200,
         "llms_txt_bytes": 500,
         "index_diff": None,

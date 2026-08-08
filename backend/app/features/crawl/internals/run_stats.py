@@ -41,7 +41,7 @@ from typing import Any, Final
 
 logger = logging.getLogger(__name__)
 
-RUN_STATS_VERSION: Final = 8
+RUN_STATS_VERSION: Final = 9
 """Which definition of this whole dict's shape a stored row was written under — not just
 `links_emitted`'s meaning, but which KEYS a row of this version even has.
 
@@ -245,7 +245,41 @@ already holds at version 7. A version-7-and-earlier row has no such key at all; 
 row always has one, `null` included, and that `null` is exactly as trustworthy as every other
 value in this dict.
 
-Every version-7 key keeps its version-7 meaning here."""
+Every version-7 key keeps its version-7 meaning here.
+
+**Version 9** rows add one key and redefine nothing (PER-196): `dropped` (`{rule: count}`) is
+`SelectionResult.dropped` — verbatim, and untyped for the reason every keyword-only parameter
+below is untyped rather than `SelectionResult` itself: this module may not import an I/O
+module, and `internals/url_ranking.py`'s `select_urls` is a sibling, not a dependency this one
+takes on — for whichever `select_urls` call actually produced this run's frontier, the same
+"whichever call actually produced the frontier" rule `urls_robots_disallowed` states at
+version 6. `{}` is a **real recorded value**, not an absent key: a run that discovered
+nothing, or that failed before discovery ever ran, or whose every candidate was selected,
+all record `{}` — exactly as `urls_robots_disallowed: 0` is a real recorded value and not a
+default standing in for "unknown." Absence of the `dropped` KEY itself means only one thing:
+this row predates version 9.
+
+**`urls_robots_disallowed` is now redundant with `dropped["robots_disallowed"]`, and stays
+anyway.** Removing a key is a shape change, and PER-191's version-6 paragraph promises that
+key on every row from version 6 onward — a promise this ticket has no reason to break. The two
+always agree by construction: both are read off the same `SelectionResult` on the same line in
+`CrawlService.execute_run`, so there is exactly one fact here, recorded under two names for two
+different readers — one that only ever wanted the robots count, and one that wants the whole
+breakdown.
+
+**`dropped`'s key order does not survive the column.** `jsonb` sorts an object's keys before
+storing it, so a reader gets them back in an order that is not `_RULE_ORDER`.
+`internals/url_ranking.py`'s `_RULE_ORDER` is the canonical order, and
+`frontend/lib/crawls/provenance-copy.ts` is the one reader that re-imposes it — driving its
+render loop from that constant rather than from `Object.entries` on whatever this key
+happens to deserialize to.
+
+Why 9 and not folded into 8: PER-194 is already merged and writing version-8 rows, so folding
+this key into 8 would leave two shapes both stamped `8` — the same argument versions 4, 6, 7
+and 8 each make for themselves, and the same one this paragraph is now making for a fifth
+time.
+
+Every version-8 key keeps its version-8 meaning here."""
 
 
 def build_run_stats(
@@ -257,6 +291,7 @@ def build_run_stats(
     urls_discovered: int,
     urls_selected: int,
     urls_robots_disallowed: int,
+    dropped: dict[str, int],
     crawl_delay_ms: int,
     pages_enriched: int,
     enrich_failures: int,
@@ -271,9 +306,9 @@ def build_run_stats(
 ) -> dict[str, Any]:
     """Combine `crawl_stats` (from `CrawlResult.stats`) with the two numbers only the
     artifacts know, the three only the discovery step knows, the two only `robots.txt`
-    handling knows, the four only the enrichment pass knows, the two only the diff step
-    knows, the four only the per-website opt-in gate knows, and `version`, into the exact
-    `dict` `runs.stats` stores.
+    handling knows, the one only the selection step's own breakdown knows, the four only the
+    enrichment pass knows, the two only the diff step knows, the four only the per-website
+    opt-in gate knows, and `version`, into the exact `dict` `runs.stats` stores.
 
     **A row's `status` and its `index_diff` can disagree about whether an index was ever
     persisted, and that is expected rather than a bug.** `CrawlService.execute_run` computes
@@ -348,6 +383,14 @@ def build_run_stats(
             whichever `select_urls` call actually produced this run's frontier (PER-191). `0`
             is a real, recorded value here — either this run's `robots.txt` disallowed
             nothing, or there was no `robots.txt` to read — never an absent key.
+        dropped: `SelectionResult.dropped` from whichever `select_urls` call actually produced
+            this run's frontier (PER-196) — the same call `urls_discovered`/`urls_selected`/
+            `urls_robots_disallowed` already read from. See that field's own docstring
+            (`internals/url_ranking.py`) for which rules can appear as keys, the order they
+            appear in when this function receives them, and the reconciliation invariant
+            (`urls_discovered == urls_selected + sum(dropped.values())`) it and
+            `urls_discovered`/`urls_selected` above satisfy together. `{}` is a real recorded
+            value, not an absent key — see `RUN_STATS_VERSION`'s version-9 paragraph.
         crawl_delay_ms: The politeness gap this run's crawl phase actually used, in
             milliseconds — `internals/robots.py`'s `effective_crawl_delay_ms(configured_ms,
             robots.crawl_delay_s)`. See `RUN_STATS_VERSION`'s own version-6 paragraph for why
@@ -401,12 +444,12 @@ def build_run_stats(
     Returns:
         `crawl_stats` spread first, followed by `links_emitted`, `full_txt_truncated`,
         `discovery_source`, `urls_discovered`, `urls_selected`, `urls_robots_disallowed`,
-        `crawl_delay_ms`, `pages_enriched`, `enrich_failures`, `enrich_input_tokens`,
-        `enrich_output_tokens`, `llms_txt_bytes`, `index_diff`, `enrich_requested`,
-        `enrich_applied`, `enrich_unavailable_reason`, `content_hashes`, and `version`.
-        `crawl_stats`'s own keys come first and are never overwritten by the eighteen added
-        here, because none of those eighteen names is a key `CrawlResult.stats` has ever
-        produced.
+        `dropped`, `crawl_delay_ms`, `pages_enriched`, `enrich_failures`,
+        `enrich_input_tokens`, `enrich_output_tokens`, `llms_txt_bytes`, `index_diff`,
+        `enrich_requested`, `enrich_applied`, `enrich_unavailable_reason`, `content_hashes`,
+        and `version`. `crawl_stats`'s own keys come first and are never overwritten by the
+        nineteen added here, because none of those nineteen names is a key `CrawlResult.stats`
+        has ever produced.
     """
     stats = {
         **crawl_stats,
@@ -416,6 +459,7 @@ def build_run_stats(
         "urls_discovered": urls_discovered,
         "urls_selected": urls_selected,
         "urls_robots_disallowed": urls_robots_disallowed,
+        "dropped": dropped,
         "crawl_delay_ms": crawl_delay_ms,
         "pages_enriched": pages_enriched,
         "enrich_failures": enrich_failures,
