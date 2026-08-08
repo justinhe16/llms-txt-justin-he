@@ -127,6 +127,13 @@ export function OutputTab({
  * The dropdown that switches between runs, labelled by relative time and status — the two
  * things that distinguish one run from another to a person. A run id would be precise and
  * useless.
+ *
+ * `RunEnrichmentBadge` renders in both places a run appears here — the trigger button
+ * (`selected`) and every `DropdownMenuRadioItem` in the list — not only the selected one.
+ * Enrichment state is exactly the kind of thing a person uses this picker to look for ("which
+ * run actually got Claude's titles?"), so it has to be visible while choosing, not only after.
+ * Both call sites hand the component a raw `run` and let `runEnrichmentState` decide what, if
+ * anything, to show; neither re-derives that predicate itself.
  */
 function RunPicker({
   runs,
@@ -168,6 +175,7 @@ function RunPicker({
                 <span className="flex min-w-0 items-center gap-2">
                   <RelativeTime iso={run.started_at} className="text-sm" />
                   <RunStatusIndicator status={rowStatusFromRunStatus(run.status)} />
+                  <RunEnrichmentBadge run={run} />
                 </span>
               </DropdownMenuRadioItem>
             ))}
