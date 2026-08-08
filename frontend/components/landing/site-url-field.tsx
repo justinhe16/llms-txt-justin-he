@@ -157,8 +157,15 @@ export function SiteUrlField({
 
       {/* The opt-in checkbox, under the field and above the live region. Disabled under the
           same three conditions the field itself is — a checkbox nobody can submit yet is not
-          a useful choice to offer. */}
-      <div className="mt-3 flex items-start gap-2.5 px-1">
+          a useful choice to offer.
+
+          `text-left` is load-bearing, not decoration: the hero container this sits inside is
+          `text-center` (app/page.tsx), which every descendant inherits. That is right for the
+          headline above but wrong here — a centred label and a centred two-line help paragraph
+          sitting beside a left-aligned checkbox give the block three different left edges and
+          a ragged rag. Overriding it here lines the label, the help text, and the checkbox up
+          on one edge, and leaves the headline's centring alone. */}
+      <div className="mt-3 flex items-start gap-2.5 px-1 text-left">
         <Checkbox
           id={enrichmentCheckboxId}
           checked={enrichWithLlm}

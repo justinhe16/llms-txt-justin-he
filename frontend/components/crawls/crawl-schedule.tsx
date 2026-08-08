@@ -51,7 +51,7 @@ export function CrawlSchedule({ website }: { website: WebsiteListItem }) {
 
   if (label === null) {
     return (
-      <span className="inline-flex flex-wrap items-center gap-2">
+      <span className="inline-flex items-center gap-2">
         <EmptyCell label="no schedule" />
         {enrichmentBadge}
       </span>
@@ -78,7 +78,7 @@ export function CrawlSchedule({ website }: { website: WebsiteListItem }) {
     );
 
   return (
-    <span className="inline-flex flex-wrap items-center gap-2">
+    <span className="inline-flex items-center gap-2">
       {intervalContent}
       {enrichmentBadge}
     </span>
@@ -94,19 +94,28 @@ export function CrawlSchedule({ website }: { website: WebsiteListItem }) {
  * (the fallback) and `CircleCheckIcon` (the positive "applied" state) on the Runs and Output
  * tabs, and this badge answers a different question (intent, not outcome) on a different
  * screen — a plain wand, no stars, keeps this from reading as a restatement of either of
- * those two once a reader has seen both screens in one session. The icon is `aria-hidden`
- * and carries no meaning on its own: the visible badge text (`ENRICHMENT_NEXT_RUN_BADGE`) is
- * the accessible name, the same text/aria split `RunStatusIndicator` (run-status-indicator.tsx)
- * uses for its dot-plus-label pair, applied here because this table cell is dense enough that
- * an icon-only affordance would be the easiest thing in it to miss.
+ * those two once a reader has seen both screens in one session.
+ *
+ * **The label is screen-reader-only, and that is what keeps this cell on one line.** At the
+ * 13% `columns.ts` gives the Schedule column, an interval badge plus a badge reading
+ * "Enriches next run" does not fit on one line at ordinary desktop widths — the pair wrapped,
+ * and a wrapped row is taller than the `ROW_HEIGHT` every row (real and skeleton) is supposed
+ * to share, which is the content-jump `columns.ts` exists to prevent. Shrinking the visible
+ * mark to the icon alone fixes that at the source rather than letting the row grow.
+ *
+ * The icon is therefore `aria-hidden` and paired with an `sr-only` label, exactly the split
+ * `EmptyCell` (empty-cell.tsx) uses for its em dash: the glyph carries the meaning for sighted
+ * readers, the hidden text carries it for everyone else, and the tooltip spells out the full
+ * sentence for anyone who hovers. That keeps the affordance off the colour-and-icon-alone
+ * footing an unlabelled mark would have.
  */
 function EnrichmentForecastBadge() {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <Badge variant="outline" className="gap-1 font-normal text-muted-foreground">
+        <Badge variant="outline" className="px-1.5 font-normal text-muted-foreground">
           <WandIcon aria-hidden="true" className="size-3" />
-          {ENRICHMENT_NEXT_RUN_BADGE}
+          <span className="sr-only">{ENRICHMENT_NEXT_RUN_BADGE}</span>
         </Badge>
       </TooltipTrigger>
       <TooltipContent>{ENRICHMENT_NEXT_RUN_EXPLANATION}</TooltipContent>

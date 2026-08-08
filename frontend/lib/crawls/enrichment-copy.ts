@@ -39,9 +39,12 @@ export const ENRICHMENT_FALLBACK_EXPLANATION =
  * with Claude") — that is the checkbox's own label, worded as an instruction to the toggle
  * itself, not as a sentence describing what a table cell means.
  *
- * Kept short enough to sit beside — or in place of — the interval badge in a table cell
- * `columns.ts` gives 13% of the table's width (see that cell's own docstring for why it still
- * renders with no schedule at all).
+ * **Rendered `sr-only`, not visibly.** At the 13% `columns.ts` gives the Schedule column this
+ * text alongside an interval badge wrapped to a second line, making the row taller than the
+ * shared `ROW_HEIGHT`; the cell shows the wand icon alone and uses this string as the
+ * accessible name instead (see `EnrichmentForecastBadge` in crawl-schedule.tsx, and that
+ * cell's docstring for why it still renders with no schedule at all). Keep it a label naming
+ * the thing itself, not a sentence — a screen reader announces it as the badge's name.
  */
 export const ENRICHMENT_NEXT_RUN_BADGE = "Enriches next run";
 
