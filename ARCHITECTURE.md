@@ -1173,8 +1173,8 @@ never exist only in the README.
   opinions, including the `prose-invert` dark variant §8.5 forbids.
   `app/docs/(run)/page.mdx` ("How a run works"), `app/docs/architecture/page.mdx`
   ("Architecture") and `app/docs/features/page.mdx` ("Features", PER-192 — usage-focused:
-  the website/run/schedule object model, adding a site, schedules, Trends, the canonical
-  limits table, and the API) are the three, and they are three *routes*, not one page
+  the website/run/schedule object model, adding a site, schedules, summarization, Trends, the
+  canonical limits table, and the API) are the three, and they are three *routes*, not one page
   switching between three bodies — `app/docs/(run)/` is a route group, which keeps that one
   at `/docs` (a route group's parens are stripped from the URL) while still letting each tab
   own its own `metadata` and its own left-column layout (`app/docs/(run)/layout.tsx`,

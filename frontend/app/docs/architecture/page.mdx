@@ -30,8 +30,10 @@ do, see [Features](/docs/features), and for how one run works, see [How a run wo
 
 Four deployed pieces: Vercel (Next.js), Fly.io (FastAPI and the ARQ worker, one image), Upstash
 Redis (the job queue), and Supabase (Postgres, Auth, Storage). The worker can call Anthropic to
-summarize a page; `CRAWL_ENRICH_WITH_LLM` is off in production, so it doesn't today — the
-diagram draws that edge dashed, not animated.
+summarize a page, but only when a website has opted in **and** the deployment's own
+`CRAWL_ENRICH_WITH_LLM` is on. That deployment flag is off in production, so the worker calls
+Anthropic for no run today, whatever an individual website's own setting — the diagram draws
+that edge dashed, not animated.
 
 ## Next.js
 

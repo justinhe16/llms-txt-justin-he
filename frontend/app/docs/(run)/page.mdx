@@ -15,11 +15,14 @@ llms-text generates an `llms.txt` file for a website.
     needs — lives on the Features tab's Limits section now, not here; see that section for
     why the split exists.
 
-    One section states a condition rather than a flat behaviour. "Summarize" is gated by
-    `CRAWL_ENRICH_WITH_LLM`, which is `false` in the deployed service — so the sentence that
-    would read best ("Claude Haiku 4.5 writes a title for every page") is not true of this
-    site today. The stage is described with its condition instead. That is a fact about
-    configuration, not a roadmap note. */}
+    One section states a condition rather than a flat behaviour. "Summarize" runs only when
+    two things are both true: the website has opted in (`enrich_with_llm`, off by default —
+    see the Features tab's [Summarization](/docs/features#summarization) section) and the
+    deployment's own `CRAWL_ENRICH_WITH_LLM` is on. The deployment flag is `false` in the
+    deployed service, so no run calls a model today, whatever a website's own setting — so the
+    sentence that would read best ("Claude Haiku 4.5 writes a title for every page") is not
+    true of this site today. The stage is described with its condition instead. That is a fact
+    about configuration, not a roadmap note. */}
 
 `llms.txt` is a Markdown file a site publishes at its root — `example.com/llms.txt`. It names
 the site and lists the pages worth reading. The convention is defined at
@@ -134,11 +137,16 @@ from `llms.txt`.
 
 ## Summarize
 
-This stage is off in the deployed service. `CRAWL_ENRICH_WITH_LLM` is `false`. Each page keeps
-the title and description that extraction produced, and a run completes without calling a
-model.
+A run summarizes a page only when two things are both true: the website has opted in —
+**Summarize pages with Claude**, off by default, set when adding a site or from the site's own
+page (see [Summarization](/docs/features#summarization) on the Features tab) — and the
+deployment's own `CRAWL_ENRICH_WITH_LLM` is on. That deployment flag is `false` in the deployed
+service, so no run calls a model today, whatever a website's own setting: each page keeps the
+title and description that extraction produced, and a run completes without calling a model. A
+run that asked for summarization and did not get it says so in its own stats, and its row on
+the Runs and Output tabs carries an **Enrichment unavailable** badge.
 
-Where the flag is `true`, each page's first 4,000 characters go to Claude Haiku 4.5. The model
+Where both gates are on, each page's first 4,000 characters go to Claude Haiku 4.5. The model
 returns a 3–4 word title and a 9–10 word description for that page. Ten requests run at a
 time, under 15 seconds per request and 90 seconds for the stage. A page whose request fails
 keeps its extracted title and description. The archived page data keeps the extracted values

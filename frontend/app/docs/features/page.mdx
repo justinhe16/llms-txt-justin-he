@@ -89,13 +89,30 @@ crawling in the same second forever.
 
 A schedule can be switched off without being deleted.
 
+## Summarization
+
+llms-text can ask Claude to write each page's title and description, in place of what
+extraction reads off the page's own markup. **Summarize pages with Claude** is a checkbox for
+that — on the [home page](/)'s add-site form, and on a site's own page (its Schedule tab,
+beside the schedule controls). It is per-website and off by default; check it when adding a
+site, or flip it any time after. One Claude Haiku 4.5 call runs per page, on the first 4,000
+characters — on the order of cents for a 100-page run. It applies to the next run; past runs
+are unchanged.
+
+Checking it is a request, not a guarantee. A run only calls the model when the website has
+opted in **and** this deployment has summarization turned on — an operator-level setting this
+product never exposes (see [Architecture](/docs/architecture#shape)). A run that requested
+summarization and didn't get it still completes, using the titles and descriptions extraction
+already produced, and its row on the Runs and Output tabs carries an **Enrichment
+unavailable** badge.
+
 ## Trends
 
 Trends is the last of four tabs on a website's page (`/crawls/{id}`). As of a recent rework
 it reports on the artifact — what `llms.txt` looks like, and what changed in it — rather than
 on the crawler's own timing.
 
-Four tiles lead the panel: the newest run's page count, then three diffs against the previous
+Five tiles lead the panel: the newest run's page count, then four diffs against the previous
 completed run:
 
 <DocsTable>
@@ -119,8 +136,15 @@ completed run:
       <td>pages in the previous run that aren't in this one</td>
     </tr>
     <tr>
-      <td>Changed</td>
-      <td>pages in both runs, with different content</td>
+      <td>Content changed</td>
+      <td>pages in both runs whose extracted content differs</td>
+    </tr>
+    <tr>
+      <td>Titles & descriptions</td>
+      <td>
+        pages in both runs with a different title or description — not comparable when
+        summarization turned on or off since the previous run
+      </td>
     </tr>
   </tbody>
 </DocsTable>
@@ -128,9 +152,9 @@ completed run:
 Below the tiles sit three charts. Index size shows `llms.txt` size per bucket, from the last
 completed run in it. Index changes shows pages added and removed per bucket, from runs that
 recorded a comparison. Outcomes shows how runs in the window ended — completed, failed, or
-still in progress. A "What changed in the latest run" panel names the added, removed and
-changed pages. Total runs and success rate sit below all of it, in one line rather than as
-tiles of their own.
+still in progress. A "What changed in the latest run" panel names the added, removed,
+content-changed and metadata-changed pages. Total runs and success rate sit below all of it,
+in one line rather than as tiles of their own.
 
 A **1d / 7d / 14d** switcher above the panel selects the window. The choice lives in the URL
 (`?window=`), so a link to a specific window reopens exactly that view.

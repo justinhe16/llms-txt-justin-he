@@ -5,7 +5,7 @@ import { FeaturesContents } from "@/components/docs/features-contents";
 export const metadata: Metadata = {
   title: "Features · llms-text",
   description:
-    "The website/run/schedule model, adding a site, schedules, Trends, the full set of limits, and the API.",
+    "The website/run/schedule model, adding a site, schedules, summarization, Trends, the full set of limits, and the API.",
 };
 
 /**

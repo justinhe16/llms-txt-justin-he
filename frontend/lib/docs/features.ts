@@ -17,11 +17,12 @@ export type FeaturesSection = {
   label: string;
 };
 
-/** The six sections of `/docs/features`, in document order. */
+/** The seven sections of `/docs/features`, in document order. */
 export const FEATURES_SECTIONS: readonly FeaturesSection[] = [
   { id: "object-model", label: "Object model" },
   { id: "adding-a-site", label: "Adding a site" },
   { id: "schedules", label: "Schedules" },
+  { id: "summarization", label: "Summarization" },
   { id: "trends", label: "Trends" },
   { id: "limits", label: "Limits" },
   { id: "api", label: "API" },

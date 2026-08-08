@@ -7,7 +7,7 @@ import { FEATURES_SECTIONS } from "@/lib/docs/features";
  * pipeline or a topology, and inventing shapes for them would draw a picture this tab does
  * not have. This renders the same left-column slot `DocsDiagram` and `ArchitectureDiagram`
  * fill on the other two tabs, so the three tabs still read as one family, but its content is
- * six plain links to the headings on the right.
+ * seven plain links to the headings on the right.
  *
  * A server component, deliberately. `DocsDiagram` and `ArchitectureDiagram` are `"use
  * client"` because each drives an `AnimatedBeam` measuring the DOM and (on the pipeline)

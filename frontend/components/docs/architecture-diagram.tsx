@@ -182,8 +182,11 @@ export function ArchitectureDiagram() {
                 ? {
                     className: "[&_path]:[stroke-dasharray:4_4]",
                     // The gradient stops are the path's own colour, so the beam never appears
-                    // to carry anything. CRAWL_ENRICH_WITH_LLM is false in the deployed
-                    // service; a travelling pulse would claim a call that does not happen.
+                    // to carry anything. Enrichment now takes two gates — a website's own
+                    // opt-in, and this deployment-wide flag — but the deployment half,
+                    // CRAWL_ENRICH_WITH_LLM, is false in the deployed service on its own,
+                    // which is already enough to keep the worker from ever calling Anthropic;
+                    // a travelling pulse would claim a call that does not happen.
                     gradientStartColor: "var(--border)",
                     gradientStopColor: "var(--border)",
                   }
