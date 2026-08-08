@@ -56,6 +56,12 @@ export function runPagesCrawled(run: Pick<RunListItem, "stats">): number | null 
  * which is not the "unavailable" case this badge exists to flag — see
  * `RUN_STATS_VERSION`'s own version-8 paragraph (`backend/app/features/crawl/internals/
  * run_stats.py`) for the full decision table this predicate is the frontend's reading of.
+ *
+ * Superseded as the Runs/Output tabs' only enrichment predicate by `runEnrichmentState`
+ * below, which folds this exact clause in as its `"fell_back"` branch. Kept as its own named
+ * export rather than inlined into that function's body, because it is still the precise
+ * definition of "asked and did not get it" on its own terms, and `runEnrichmentState`'s
+ * docstring reads better pointing at this one than restating it.
  */
 export function runEnrichmentFellBack(run: Pick<RunListItem, "status" | "stats">): boolean {
   return (
@@ -64,6 +70,49 @@ export function runEnrichmentFellBack(run: Pick<RunListItem, "status" | "stats">
     run.stats?.enrich_applied === false &&
     typeof run.stats?.enrich_unavailable_reason === "string"
   );
+}
+
+/**
+ * The three mutually exclusive things a run's own `stats` can say about enrichment — `null`
+ * covers two genuinely different situations the caller does not need to tell apart: a run
+ * that never asked (`enrich_requested` absent or `false`), and a run old enough to predate
+ * `RUN_STATS_VERSION` 8 entirely, whose `stats` carries no enrichment keys at all. Both render
+ * nothing, for the same reason: this run's own record makes no claim either way, and the one
+ * fact this module refuses to report is a guess.
+ */
+export type RunEnrichmentState = "applied" | "fell_back";
+
+/**
+ * `RunEnrichmentBadge`'s (components/crawls/run-enrichment-badge.tsx) single predicate — the
+ * token-keyed shape `RunStatusIndicator` (run-status-indicator.tsx) uses for
+ * `RowStatus`, applied here even though this union has only two members and a `null`,
+ * because the alternative is two booleans a caller has to know are mutually exclusive rather
+ * than one function that enforces it.
+ *
+ * **`undefined` is never read as `false`.** A run written before `RUN_STATS_VERSION` 8 has no
+ * `enrich_applied` key at all — `run.stats?.enrich_applied` is `undefined` on every one of
+ * them — and `undefined === true` is `false` in JavaScript regardless of which branch tests
+ * it, so both checks below are written as explicit `=== true` / `=== false` rather than a
+ * truthiness test for exactly the reason PER-194's retrofit of `metadata_changed`
+ * (ARCHITECTURE.md §3.4) treats an unknown previous mode as its own case instead of quietly
+ * becoming one side of a boolean: a pre-version-8 run is genuinely unknown, not "did not
+ * enrich," and claiming otherwise is a statement the data does not support.
+ *
+ * `"applied"` is checked first and is deliberately NOT gated on `enrich_requested` — the
+ * backend only ever writes `enrich_applied: true` when a request was made and succeeded
+ * (`CrawlService.execute_run`, ARCHITECTURE.md §3.4's version-8 paragraph), so requiring both
+ * here would be redundant with what the writer already guarantees, the same trust
+ * `runPagesCrawled` above places in `pages_crawled`'s shape rather than re-deriving it.
+ * `"fell_back"` reuses `runEnrichmentFellBack` unchanged, so the existing badge's condition is
+ * not restated a second time where it could drift from this one.
+ */
+export function runEnrichmentState(
+  run: Pick<RunListItem, "status" | "stats">
+): RunEnrichmentState | null {
+  if (run.status !== "completed") return null;
+  if (run.stats?.enrich_applied === true) return "applied";
+  if (runEnrichmentFellBack(run)) return "fell_back";
+  return null;
 }
 
 /**

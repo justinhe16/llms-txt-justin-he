@@ -563,7 +563,15 @@ reads `website.enrich_with_llm` once, at the top of the attempt, into `enrich_re
 built no `AsyncAnthropic` client), or `"api_error"` (the pass ran and produced no usable
 summary) in `runs.stats["enrich_unavailable_reason"]`, alongside `enrich_requested` and
 `enrich_applied` — see `internals/run_stats.py`'s `RUN_STATS_VERSION` 8 paragraph for the full
-decision table. The Runs and Output tabs render a badge when a run asked and did not get it.
+decision table. The Runs and Output tabs render one of two badges from a run's own `stats` —
+`RunEnrichmentBadge` (`frontend/components/crawls/run-enrichment-badge.tsx`) shows a positive
+badge when `enrich_applied` is `true` and the existing fallback badge when a run asked and did
+not get it, and renders nothing for a run whose `stats` make no claim either way, `undefined`
+included. `/crawls`' Schedule cell (`frontend/components/crawls/crawl-schedule.tsx`) carries
+the WEBSITE half of this same distinction, forward-looking rather than historical: it shows a
+badge whenever `website.enrich_with_llm` is `true`, independently of whether the row has a
+schedule, because "the next run will enrich" and "did this past run enrich" are answers to two
+different questions and the two badges deliberately do not share wording.
 
 **Diffing one run's index against the previous completed run's, as of PER-193.**
 `internals/index_diff.py`'s `build_index_diff` is a fourth model-free, pure module in this
