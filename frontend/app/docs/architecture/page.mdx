@@ -23,6 +23,9 @@
        ARCHITECTURE.md does — it does not follow ARCHITECTURE.md's prose, which can itself go
        stale. */}
 
+llms-text runs on four deployed pieces. This page is what's deployed and why; for what you can
+do, see [Features](/docs/features), and for how one run works, see [How a run works](/docs).
+
 ## Shape
 
 Four deployed pieces: Vercel (Next.js), Fly.io (FastAPI and the ARQ worker, one image), Upstash
@@ -33,21 +36,23 @@ diagram draws that edge dashed, not animated.
 ## Next.js
 
 Vercel. The App Router, and the route handlers under `app/api/[...path]/` that proxy every
-request to FastAPI. That proxy is the only logic here — see **Request path**.
+request to FastAPI. That proxy is the only logic here — see [Request path](#request-path).
 
 ## FastAPI
 
 Fly.io, the `app` process — one of two on the same Docker image as the worker, scaled
-independently. It holds the HTTP API: auth, every read, every write, and enqueuing a triggered
-run into the job queue. It never crawls; that's the worker.
+independently. It holds the HTTP API: auth, every read, every write, and enqueuing a
+[triggered](/docs/features#object-model) run into the job queue. It never crawls; that's the
+worker.
 
 ## Job queue
 
 Upstash Redis holds the ARQ queue. A crawl job goes in from two places: someone presses **Run
-now**, or the scheduler tick fires — every 60 seconds, at second 0, claiming up to 50 due
-schedules per pass. Both commit the `runs` row, then enqueue the job, in that order: commit
-first, enqueue second, so a crash between them leaves a `pending` row nothing will act on. The
-reaper sweeps those after 10 minutes — see **Failure handling**.
+now**, or the scheduler tick fires — at second 0 of every minute (see
+[Schedules](/docs/features#schedules) for the cadence and batch size). Both commit the `runs`
+row, then enqueue the job, in that order: commit first, enqueue second, so a crash between them
+leaves a `pending` row nothing will act on. The reaper sweeps those after 10 minutes — see
+[Failure handling](#failure-handling).
 
 The worker polls Redis every 5 seconds and claims what's due.
 
@@ -56,11 +61,11 @@ The worker polls Redis every 5 seconds and claims what's due.
 Fly.io, the `worker` process. Three things run here, and only here:
 
 - **The crawl** — fetches a site, extracts its pages, writes the two artifacts.
-- **The scheduler tick** — every 60 seconds, turns a due schedule into a run and enqueues it
-  back into the job queue.
-- **The reaper** — every 5 minutes, sweeps stuck runs (see **Failure handling**).
+- **The scheduler tick** — turns a due schedule into a run and enqueues it back into the job
+  queue (see [Schedules](/docs/features#schedules)).
+- **The reaper** — every 5 minutes, sweeps stuck runs (see [Failure handling](#failure-handling)).
 
-One worker machine runs at most 2 of these at a time (see **Concurrency**).
+One worker machine runs at most 2 of these at a time (see [Concurrency](#concurrency)).
 
 ## Supabase
 
@@ -69,9 +74,10 @@ and its migrations, never the deployed database. The API and the worker each bui
 pool of 2 to 10 connections — together up to 20, not 10.
 
 A completed run's `llms.txt` and `llms-full.txt` live directly in `runs` columns (see
-**Trade-offs**). Its full corpus — every page's markdown, gzip-compressed, newline-delimited
-JSON — goes to Storage separately, at `crawl-payloads/{website_id}/{run_id}.jsonl.gz`, uploaded
-before the transaction that records its path: a transaction here never spans a network call.
+[Trade-offs](#trade-offs)). Its full corpus — every page's markdown, gzip-compressed,
+newline-delimited JSON — goes to Storage separately, at
+`crawl-payloads/{website_id}/{run_id}.jsonl.gz`, uploaded before the transaction that records
+its path: a transaction here never spans a network call.
 
 ## Request path
 
@@ -138,5 +144,5 @@ to 100 rows per pass.
   the Postgres connection budget: pool size is per process, not shared, so the API and the
   worker each add up to 10. Then `runs` itself, growing up to 5 MiB per completed run.
 - **What would change first.** Artifacts move to Storage with signed URLs; extraction moves off
-  the event loop; rate limiting moves to the edge, per user. Today's two abuse caps are
-  check-then-act, not atomic.
+  the event loop; rate limiting moves to the edge, per user. Today's two abuse caps (see
+  [Limits](/docs/features#limits)) are check-then-act, not atomic.

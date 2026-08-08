@@ -1,5 +1,7 @@
 "use client";
 
+import Link from "next/link";
+
 import { Skeleton } from "@/components/ui/skeleton";
 import type { StatsIndexDiff, StatsIndexPageRef, StatsLatest } from "@/lib/api/runs";
 import { METADATA_NOT_COMPARABLE } from "@/lib/crawls/enrichment-copy";
@@ -23,7 +25,7 @@ import { RelativeTime } from "./relative-time";
  * | `latest` | `diff_state` | `previous_run_completed` | message |
  * | --- | --- | --- | --- |
  * | `null` | — | — | "No completed run in this window." |
- * | present | `"not_recorded"` | any | "No comparison available for this run." |
+ * | present | `"not_recorded"` | any | "No comparison available for this run." plus a caption on why and a docs link |
  * | present | `"first_run"` | `null` | "First run of this site — nothing to compare against yet." |
  * | present | `"first_run"` | `false` | "No completed run before this one to compare against — every earlier run failed." |
  * | present | `"compared"` | `true` | the numbers, no extra message |
@@ -45,6 +47,14 @@ import { RelativeTime } from "./relative-time";
  * `null` is a zero: a `null` "Titles & descriptions" cell renders `METADATA_NOT_COMPARABLE`'s
  * sentence for the direction that flipped, and a `null` "Content changed" cell renders the
  * same `EmptyCell` treatment `urls_discovered_delta` gets below.
+ *
+ * ## The `"not_recorded"` caption
+ *
+ * The single most likely support question this tab produces: every site with run history from
+ * before `index_diff` shipped opens Trends to an empty "what changed" block, with nothing on
+ * this page to say why. `previous_run_completed` carries no signal here — it stays unset for a
+ * row with no `index_diff` key at all, which is the common case this caption exists for — so
+ * the message is the same regardless of that field, unlike the two `"first_run"` rows above.
  */
 export function TrendsWhatChanged({ latest }: { latest: StatsLatest | null }) {
   return (
@@ -93,7 +103,12 @@ function TrendsWhatChangedBody({ latest }: { latest: StatsLatest | null }) {
 
   switch (latest.diff_state) {
     case "not_recorded":
-      return <EmptyMessage>No comparison available for this run.</EmptyMessage>;
+      return (
+        <div className="space-y-1">
+          <EmptyMessage>No comparison available for this run.</EmptyMessage>
+          <NotRecordedCaption />
+        </div>
+      );
 
     case "first_run":
       return (
@@ -118,6 +133,24 @@ function TrendsWhatChangedBody({ latest }: { latest: StatsLatest | null }) {
 
 function EmptyMessage({ children }: { children: React.ReactNode }) {
   return <p className="text-sm text-muted-foreground">{children}</p>;
+}
+
+/**
+ * The caption under `"not_recorded"`'s empty message — see the module docstring's own section
+ * on it. A side note, not a second message: it explains the mechanism (comparisons are
+ * recorded at run completion) rather than repeating that this particular run has none.
+ */
+function NotRecordedCaption() {
+  return (
+    <p className="text-xs text-muted-foreground">
+      Comparisons are recorded when a run completes — runs from before this feature shipped
+      don&apos;t have one, and the next completed run will.{" "}
+      <Link href="/docs/features#trends" className="text-primary underline-offset-4 hover:underline">
+        Learn more
+      </Link>
+      .
+    </p>
+  );
 }
 
 function ComparedBody({

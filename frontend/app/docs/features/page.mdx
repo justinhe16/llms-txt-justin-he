@@ -20,11 +20,11 @@ import { DocsTable } from "@/components/docs/docs-table";
        needs, and link here rather than restating the full set — see this page's own Limits
        section for why that split exists and where each number now lives. */}
 
-This tab is what things are, and how you use them: the website/run/schedule model, adding a
-site, keeping it current on a schedule, watching its output change over time, the limits that
-bound every run, and the API underneath all of it. For the seven stages a run passes through,
-see [How a run works](/docs). For what's deployed and why, see
-[Architecture](/docs/architecture).
+llms-text generates an `llms.txt` file for a website. This tab is what things are, and how you
+use them: the website/run/schedule model, adding a site, keeping it current on a schedule,
+watching its output change over time, the limits that bound every run, and the API underneath
+all of it. For the seven stages a run passes through, see [How a run works](/docs). For what's
+deployed and why, see [Architecture](/docs/architecture).
 
 ## Object model
 
@@ -95,7 +95,8 @@ Trends is the last of four tabs on a website's page (`/crawls/{id}`). As of a re
 it reports on the artifact — what `llms.txt` looks like, and what changed in it — rather than
 on the crawler's own timing.
 
-Four tiles lead the panel, each computed against the previous completed run:
+Four tiles lead the panel: the newest run's page count, then three diffs against the previous
+completed run:
 
 <DocsTable>
   <thead>
@@ -124,12 +125,12 @@ Four tiles lead the panel, each computed against the previous completed run:
   </tbody>
 </DocsTable>
 
-Below the tiles: an **index size** chart (`llms.txt` size per bucket, from the last completed
-run in it), an **index changes** chart (pages added and removed per bucket, from runs that
-recorded a comparison), and an **outcomes** chart (how runs in the window ended — completed,
-failed, or still in progress). A "What changed in the latest run" panel names the added,
-removed and changed pages. Total runs and success rate sit below all of it, in one line
-rather than as tiles of their own.
+Below the tiles sit three charts. Index size shows `llms.txt` size per bucket, from the last
+completed run in it. Index changes shows pages added and removed per bucket, from runs that
+recorded a comparison. Outcomes shows how runs in the window ended — completed, failed, or
+still in progress. A "What changed in the latest run" panel names the added, removed and
+changed pages. Total runs and success rate sit below all of it, in one line rather than as
+tiles of their own.
 
 A **1d / 7d / 14d** switcher above the panel selects the window. The choice lives in the URL
 (`?window=`), so a link to a specific window reopens exactly that view.
@@ -165,19 +166,27 @@ A **1d / 7d / 14d** switcher above the panel selects the window. The choice live
   </tbody>
 </DocsTable>
 
-7d is the default. Every bucket, in every window, is a UTC hour or a UTC day — the panel says
-so once rather than converting to the reader's own time zone, so a bucket's label always
-matches the instant it covers.
+7d is the default. Every bucket, in every window, is a UTC hour or a UTC day. The panel says so
+once rather than converting to the reader's own time zone, so a bucket's label always matches
+the instant it covers.
 
 Each chart decides its own emptiness. The outcomes chart is empty only when the window has no
 runs at all. The index size and index changes charts can still be empty with runs in the
 window — a run whose comparison wasn't recorded, or that predates this window's own history,
 contributes no point to either.
 
+A run's comparison lives inside that run's own stored stats rather than a separate table, so
+it appears the moment a run completes — there is nothing to backfill. A run that completed
+before this comparison shipped simply has no such field, which is why an established site can
+open Trends to three empty lists: that run predates the feature, not a data problem. A site's
+very first run has nothing to compare against either, for the unrelated reason that no earlier
+run exists. Either way, the fix is time: the next completed run compares itself against the
+latest completed run that has a stored `llms.txt`, whichever version wrote it.
+
 A website that has never been crawled shows a prompt to run one instead of an empty panel.
-That distinction comes from the site's run history, not from this endpoint: every field it
-returns is scoped to the selected window, so on its own it cannot tell "nothing in this
-window" apart from "nothing, ever."
+That distinction comes from the site's run history, not from this endpoint. Every field the
+endpoint returns is scoped to the selected window, so on its own it cannot tell "nothing in
+this window" apart from "nothing, ever."
 
 ## Limits
 
