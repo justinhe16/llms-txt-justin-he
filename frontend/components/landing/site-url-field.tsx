@@ -166,7 +166,13 @@ export function SiteUrlField({
           a ragged rag. Overriding it here lines the label, the help text, and the checkbox up
           on one edge, and leaves the headline's centring alone. */}
       <div className="mt-3 flex items-start gap-2.5 px-1 text-left">
+        {/* `mt-0.5` is optical alignment, not a magic number: the checkbox is `size-4` (16px)
+            while the label beside it is `text-sm`, whose line box is 20px. Under `items-start`
+            both start at the same y, which puts the checkbox's centre 2px above the centre of
+            the label's first line and reads as the text hanging low. Nudging the box down half
+            a step centres the two on each other. */}
         <Checkbox
+          className="mt-0.5"
           id={enrichmentCheckboxId}
           checked={enrichWithLlm}
           disabled={isDisabled}

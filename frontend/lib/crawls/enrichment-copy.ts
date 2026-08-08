@@ -14,12 +14,21 @@
 export const ENRICHMENT_LABEL = "Summarize pages with Claude";
 
 /**
- * The help text under the toggle. States the mechanism and an order of magnitude — never a
- * computed estimate — so a change to actual pricing never makes this sentence wrong. Mirrors
+ * The help text under the toggle.
+ *
+ * **Leads with the effect on the artifact, then the cost.** The earlier wording opened on the
+ * mechanism and the price and never said what the setting actually changes, which left the
+ * reader to guess whether summaries land in their llms.txt or somewhere else entirely. What
+ * enrichment does is narrow and worth stating plainly: it rewrites each entry's title and
+ * description — and nothing else about the crawl — so naming those two fields is both the
+ * clearest description and an accurate one.
+ *
+ * Still states the mechanism and an order of magnitude rather than a computed estimate, so a
+ * change to actual pricing never makes this sentence wrong. Mirrors
  * `backend/app/core/settings.py`'s own arithmetic comment for `crawl_enrich_max_chars`.
  */
 export const ENRICHMENT_HELP =
-  "One Claude Haiku 4.5 call per page, on the first 4,000 characters. On the order of cents for a 100-page run.";
+  "Claude writes the titles and descriptions in your llms.txt instead of reusing each page's own. One Claude Haiku 4.5 call per page, on the first 4,000 characters — cents for a 100-page run.";
 
 /** The Runs-tab and Output-tab badge's visible text, when a run asked for enrichment and did
  * not get it — `lib/crawls/run-display.ts`'s `runEnrichmentFellBack` is the predicate that
