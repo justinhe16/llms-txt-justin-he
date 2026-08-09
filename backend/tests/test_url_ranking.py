@@ -318,7 +318,6 @@ def test_seed_url_itself_is_dropped_and_never_selected() -> None:
         pytest.param("https://other.test/docs/intro", id="different-host"),
         pytest.param("http://example.test/docs/intro", id="different-scheme"),
         pytest.param("https://example.test:8443/docs/intro", id="different-port"),
-        pytest.param("https://www.example.test/docs/intro", id="www-is-a-different-host"),
     ],
 )
 def test_off_origin_urls_are_dropped(off_origin_url: str) -> None:
@@ -327,6 +326,47 @@ def test_off_origin_urls_are_dropped(off_origin_url: str) -> None:
     result = select_urls(candidates, seed_url=SEED, limit=10)
 
     assert off_origin_url not in result.selected
+    assert result.dropped["off_origin"] == 1
+
+
+def test_a_www_candidate_is_on_origin_for_an_apex_seed() -> None:
+    """**Reverses the `www-is-a-different-host` case this test used to carry**, matching
+    `websites/internals/url_normalize.py`'s own reversal.
+
+    A site whose apex redirects to `www` publishes a sitemap of `www` URLs. Under strict host
+    equality an apex seed dropped every one of them under `"off_origin"` — the rule rejecting
+    the site's own pages. Observed on `anthropic.com`: 510 discovered, 510 dropped.
+    """
+    candidates = [_url("https://www.example.test/docs/intro"), _url(f"{SEED}/docs/kept")]
+
+    result = select_urls(candidates, seed_url=SEED, limit=10)
+
+    assert "https://www.example.test/docs/intro" in result.selected
+    assert result.dropped.get("off_origin", 0) == 0
+    _assert_reconciles(result)
+
+
+def test_an_apex_candidate_is_on_origin_for_a_www_seed() -> None:
+    """The same equality, from the other direction — a `www` seed keeps apex candidates."""
+    result = select_urls(
+        [_url("https://example.test/docs/intro")],
+        seed_url="https://www.example.test",
+        limit=10,
+    )
+
+    assert "https://example.test/docs/intro" in result.selected
+    assert result.dropped.get("off_origin", 0) == 0
+
+
+@pytest.mark.parametrize(
+    "host",
+    ["www2.example.test", "wwwx.example.test"],
+)
+def test_a_host_merely_starting_with_www_is_still_off_origin(host: str) -> None:
+    """The fold is one label, not a prefix match: `www2` is an ordinary sub-domain."""
+    result = select_urls([_url(f"https://{host}/docs/intro")], seed_url=SEED, limit=10)
+
+    assert result.selected == []
     assert result.dropped["off_origin"] == 1
 
 

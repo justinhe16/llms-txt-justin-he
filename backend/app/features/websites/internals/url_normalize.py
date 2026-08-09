@@ -28,14 +28,37 @@ absolute `http`/`https` URL and what its origin is. Reachability is the crawler'
 | `https://example.com:8443` | `https://example.com:8443` | A non-default port is identity |
 | `https://example.com/a/b/` | `https://example.com` | An origin has no path, slash included |
 | `https://example.com?q=1#f` | `https://example.com` | Query and fragment are per-request |
-| `https://www.example.com` | `https://www.example.com` | **`www.` is KEPT** — see below |
+| `https://www.example.com` | `https://example.com` | **A leading `www.` is STRIPPED** — see below |
 
-**Why `www.` is kept.** It is tempting to strip it so that `www.example.com` and
-`example.com` dedupe together. That is wrong here: the two names can, and often do, serve
-different content, and this product's entire output is a crawl of whatever a host actually
-returns. Folding them would silently generate one site's `llms.txt` from another site's
-pages. The cost of keeping them separate is a user occasionally adding both; the cost of
-folding them is a wrong artifact that looks right.
+**Why a leading `www.` is stripped from the ORIGIN — and this reverses an earlier decision
+in this module, deliberately.** The paragraph that stood here argued the opposite: that the
+two names can serve different content, so folding them would "silently generate one site's
+`llms.txt` from another site's pages." The risk it named is real; what it got wrong is that
+folding the ORIGIN does not fold the CRAWL.
+
+`origin` is a dedupe key and nothing else. `url` is what
+`app.features.crawl.service` actually fetches, and `url` keeps the host exactly as the user
+typed it — so a run against a registered `https://www.example.com` fetches `www`, start to
+finish, whatever its apex would have served. No artifact is ever built from a mix of the two.
+
+What the old rule cost instead was ordinary and constant: an apex that redirects to `www` is
+the most common configuration on the web, so registering `example.com` and
+`www.example.com` produced two rows, two schedules, two crawl histories, and two `llms.txt`
+files describing byte-for-byte the same pages. Deduping that is the whole point of having a
+dedupe key.
+
+The residue is narrow and visible rather than silent: a user who registers both spellings
+gets a `409` naming the website that already exists (`app.features.websites.service`), whose
+`url` — the host that will actually be crawled — is right there in the response.
+
+**Rows written before this change keep their `www.` origins, and no migration collapses
+them.** Normalization runs at write time, so a website registered as `www.example.com`
+yesterday still has `origin = "https://www.example.com"` and will not dedupe against an
+`example.com` registered today. That is deliberate rather than deferred work: the collapse
+cannot be done as a plain `UPDATE`, because a user holding BOTH spellings has two rows that
+would become one `origin` under a `UNIQUE (user_id, origin)` index, and choosing which row's
+runs, schedule, and history survive is a product decision rather than a data-migration one.
+The cost of leaving them is one stale duplicate for a user who already had two.
 
 **What is rejected**, all with `UrlValidationError` (which the request schema turns into a
 `422`, see `app.features.websites.schemas`):
@@ -173,6 +196,40 @@ def _validate_host(host: str) -> str:
     return host
 
 
+def _strip_www(host: str) -> str:
+    """`www.example.com` -> `example.com`, for the ORIGIN only.
+
+    **`www` is not a different website.** A site whose apex redirects to `www` is the
+    overwhelmingly common configuration on the web, and before this, registering
+    `example.com` and `www.example.com` produced two rows with two crawl histories and two
+    `llms.txt` files describing the same pages. `origin` is half of the
+    `UNIQUE (user_id, origin)` dedupe key, so collapsing the prefix here is what makes those
+    one website.
+
+    **`NormalizedUrl.url` keeps the host exactly as the user typed it**, and that split is
+    the point rather than an inconsistency. `url` is what
+    `app.features.crawl.service` actually crawls, so a site that serves ONLY `www` — with no
+    DNS record on its apex at all — is still fetched at the host that answers. Stripping the
+    prefix from both halves would have turned a dedupe improvement into a crawl failure for
+    exactly those sites.
+
+    Deliberately textual and deliberately narrow: only a leading `www.` label, only when
+    something follows it. `www.com` keeps its prefix (stripping it leaves a bare TLD, which
+    is not a site), and `www2.example.com` and `wwwx.example.com` are untouched — they are
+    ordinary sub-domains that happen to start with those three letters, and no convention
+    says they mirror their apex.
+
+    The one case this gets wrong is a site that serves genuinely DIFFERENT content on
+    `example.com` and `www.example.com`. That is rare, universally considered a
+    misconfiguration, and the cost is a shared row rather than a wrong artifact — the crawl
+    still fetches whichever host was registered.
+    """
+    if not host.startswith("www."):
+        return host
+    remainder = host[4:]
+    return remainder if "." in remainder else host
+
+
 def normalize_url(raw: str) -> NormalizedUrl:
     """Validate `raw` as an absolute `http`/`https` URL and derive its origin.
 
@@ -227,7 +284,7 @@ def normalize_url(raw: str) -> NormalizedUrl:
         # non-numeric or outside 0-65535.
         raise _reject("URL port must be a number between 0 and 65535") from None
 
-    host = _validate_host(parts.hostname or "")
+    host = _strip_www(_validate_host(parts.hostname or ""))
 
     # Re-bracket an IPv6 literal: `urlsplit` strips the brackets from `hostname`, but they
     # are required in the authority component, so `[::1]:8080` must be rebuilt as such.

@@ -179,10 +179,10 @@ downstream by rule (1) anyway. The one real-world false negative this leaves —
 `docs.example.com` declaring `Sitemap: https://www.example.com/sitemap.xml` (an apex/`www`
 split, or an `http`/`https` split) — costs nothing either, because every URL such a sitemap
 would list is `www.example.com`, which rule (1) drops as off-origin regardless.
-`websites/internals/url_normalize.py`'s own module docstring makes exactly this argument for
-why `www.` is never folded into a site's origin; this module inherits the same origin
-definition (`_origin_key`, collapsing only the scheme's default port, the same equality
-`NormalizedUrl.origin` and `url_ranking._origin` already use) for the same reason — a LOCAL
+`websites/internals/url_normalize.py` folds a leading `www.` into a site's origin, and this
+module inherits that (`_origin_key`, which collapses the scheme's default port and that
+prefix — the same equality `NormalizedUrl.origin` and `url_ranking._origin` use) so an apex
+seed can find the `www` sitemap its own `robots.txt` declares. It stays a LOCAL
 helper rather than an import of either: `url_ranking._origin` takes a `_NormalizedCandidate`,
 which would drag `_parse_candidate`'s tracking-parameter stripping and trailing-slash
 normalization along for a comparison that needs neither, and `url_normalize.py` belongs to a
@@ -254,7 +254,7 @@ from app.features.crawl.internals.fetcher import (
 )
 from app.features.crawl.internals.robots import ALLOW_ALL, RobotsRules, parse_robots
 from app.features.crawl.internals.ssrf import Resolver
-from app.features.crawl.internals.url_ranking import DiscoveredUrl
+from app.features.crawl.internals.url_ranking import DiscoveredUrl, strip_www
 
 
 logger = logging.getLogger(__name__)
@@ -410,12 +410,22 @@ class _DiscoveryState:
 
 
 def _origin_key(url: str) -> tuple[str, str, int] | None:
-    """`(scheme, host.lower(), port-or-default)` for `url`, or `None` if it is not a usable
-    same-origin comparison key: an unparseable URL, a non-http(s) scheme, a hostless URL, or
-    a port `urlsplit(...).port` itself raises `ValueError` on.
+    """`(scheme, host.lower() with a leading `www.` folded away, port-or-default)` for `url`,
+    or `None` if it is not a usable same-origin comparison key: an unparseable URL, a
+    non-http(s) scheme, a hostless URL, or a port `urlsplit(...).port` itself raises
+    `ValueError` on.
 
     See the module docstring's "same-origin, enforced twice" section for why this is a local
-    helper rather than an import of `url_ranking._origin` or `url_normalize.normalize_url`.
+    helper rather than an import of `url_normalize.normalize_url` — the `strip_www` it does
+    borrow is `internals/url_ranking.py`'s, this feature's own, not another feature's.
+
+    **The `www.` fold is what makes an apex seed find its own sitemap.** A site whose apex
+    redirects to `www` declares `Sitemap: https://www.example.com/sitemap.xml` in its
+    `robots.txt` and fills that sitemap with `www` URLs. Against a strict host equality, an
+    origin of `https://example.com` drops the declared sitemap as off-origin and then drops
+    every `<loc>` in the one it fetched by convention — discovery finding the site's own map
+    and refusing all of it. Measured on `anthropic.com`: 510 URLs discovered from the `www`
+    spelling, 0 from the apex, for the identical site.
     """
     try:
         parts = urlsplit(url)
@@ -431,7 +441,11 @@ def _origin_key(url: str) -> tuple[str, str, int] | None:
         port = parts.port
     except ValueError:
         return None
-    return (scheme, host.lower(), port if port is not None else _DEFAULT_PORTS[scheme])
+    return (
+        scheme,
+        strip_www(host.lower()),
+        port if port is not None else _DEFAULT_PORTS[scheme],
+    )
 
 
 def _same_origin(url: str, origin_key: tuple[str, str, int]) -> bool:
