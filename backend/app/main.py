@@ -15,7 +15,7 @@ from app.api.middleware.request_context import (
     RequestContextMiddleware,
     request_id_exception_handler,
 )
-from app.api.routers import health, runs, schedules, websites
+from app.api.routers import health, publish, runs, schedules, websites
 from app.core.auth.jwks import close_jwks_cache, create_jwks_client, open_jwks_cache
 from app.core.logging import configure_logging
 from app.core.settings import settings
@@ -126,6 +126,7 @@ def create_app() -> FastAPI:
     app.include_router(websites.router)
     app.include_router(runs.router)
     app.include_router(schedules.router)
+    app.include_router(publish.router)
     return app
 
 

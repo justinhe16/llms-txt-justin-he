@@ -222,6 +222,49 @@ class Settings(BaseSettings):
     # and `None + timedelta` is a `TypeError` — a 500 from the code path whose whole job is
     # to answer 429 politely. Constraining it here turns that misconfiguration into a
     # refusal to boot, which is this module's whole thesis (see the module docstring).
+    # ---------------------------------------------------------------------------------
+    # Publishing a generated artifact to a GitHub repository
+    # ---------------------------------------------------------------------------------
+    #
+    # The DEPLOYMENT half of a two-level gate, exactly the shape `crawl_enrich_with_llm`
+    # above already has: a run publishes only when this is `True` AND that website's own
+    # `publish_targets.active` is set. Off by default, so a deployment with no GitHub App
+    # registered behaves precisely as it did before this feature existed — and so does CI,
+    # where no App exists and none should.
+    github_publish_enabled: bool = False
+
+    # The GitHub App's numeric id. Public information (it appears in the App's own settings
+    # page), so it is not a secret — but it is required whenever publishing is on, because an
+    # App JWT cannot be minted without it.
+    github_app_id: str = ""
+
+    # The App's PEM-encoded RS256 private key, and the only true secret this feature adds.
+    #
+    # Read in exactly one place (`internals/github_app.py`'s `mint_app_jwt`) and never logged,
+    # interpolated into a message, or `repr`'d — ARCHITECTURE.md §9.4, the same rule
+    # `anthropic_api_key` above carries. It is worth stating why this one matters more than
+    # most: this key mints installation tokens that can WRITE to a user's repository, so a
+    # leak is not a billing problem, it is a supply-chain one. It lives in Fly secrets, never
+    # in a tracked file, and `backend/.env.example` holds a placeholder only.
+    #
+    # A `str` rather than a path, because Fly secrets are environment variables and a
+    # multi-line PEM survives one fine. `\n`-escaped input is normalized at the point of use,
+    # not here, so this field stays exactly what the environment gave it.
+    github_app_private_key: str = ""
+
+    # The App's URL slug, used to build the installation link the frontend sends a user to
+    # (`https://github.com/apps/{slug}/installations/new`). Not a secret and not required for
+    # publishing itself — only for offering the "Connect a repository" affordance — but
+    # required alongside the other two when the feature is on, because a connect button that
+    # 404s is worse than no button.
+    github_app_slug: str = ""
+
+    # How long an installation access token is reused before a new one is minted. GitHub
+    # issues them with a one-hour expiry; this sits well under that so a token is never
+    # presented to the API within the window where it might have just expired in flight.
+    # Not a security boundary — the token's own `expires_at` is — just a cache bound.
+    github_token_ttl_s: int = Field(default=2400, ge=60)
+
     max_concurrent_runs_per_user: int = Field(default=2, ge=1)
     max_runs_per_day_per_user: int = Field(default=50, ge=1)
 
@@ -273,6 +316,19 @@ class Settings(BaseSettings):
         # file, added after every unconditional variable above it.
         if self.crawl_enrich_with_llm:
             required = (*required, ("ANTHROPIC_API_KEY", self.anthropic_api_key))
+        # The same deliberately obvious `if`, for the same reason: a deployment with no GitHub
+        # App registered is a correct deployment, and demanding these three would refuse to
+        # boot it — CI included, where `github_publish_enabled` is always off. All three are
+        # demanded together because any one of them missing makes the feature non-functional
+        # rather than degraded: no id and no key means no token, and no slug means no way for a
+        # user to install the App in the first place.
+        if self.github_publish_enabled:
+            required = (
+                *required,
+                ("GITHUB_APP_ID", self.github_app_id),
+                ("GITHUB_APP_PRIVATE_KEY", self.github_app_private_key),
+                ("GITHUB_APP_SLUG", self.github_app_slug),
+            )
         missing = [name for name, value in required if not value.strip()]
         if missing:
             raise RuntimeError(

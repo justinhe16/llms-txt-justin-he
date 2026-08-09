@@ -72,9 +72,13 @@ from arq.worker import Retry
 
 from app.core.logging import run_id_context, tick_id_context
 from app.core.settings import settings
+from app.features.crawl.schemas import CrawlOutcome
 from app.features.crawl.service import TransientCrawlError, build_crawl_service
+from app.features.publish.http_client import build_github_client
+from app.features.publish.service import PublishService
 from app.features.runs.service import build_run_service
 from app.features.schedules.service import build_schedule_service
+from app.features.websites.service import WebsiteService
 from app.worker.policy import (
     MAX_ATTEMPTS,
     ORPHANED_PENDING_AFTER_SECONDS,
@@ -228,7 +232,58 @@ async def crawl_task(ctx: dict[Any, Any], run_id: str | UUID) -> str:
                 "storage_path": outcome.storage_path,
             },
         )
+
+        # PUBLISHING, AFTER THE RUN IS ALREADY RECORDED — and the position is the design.
+        #
+        # `execute_run` has returned, which means the artifact is generated, uploaded, and
+        # committed to `runs.llms_txt`. Delivering a copy to a git repository is a separate
+        # concern that happens afterwards, and putting the call HERE rather than inside
+        # `CrawlService` is what makes "a publish failure cannot fail a run" structural instead of
+        # a rule someone has to keep obeying: there is no longer a run in flight to fail.
+        #
+        # It is also why `CrawlService` gains no new collaborator. Two features, orchestrated by
+        # the worker, is exactly what a job function is for (ARCHITECTURE.md §3.1) — the crawl
+        # feature does not import the publish feature, and neither imports the other's internals.
+        #
+        # `publish_run` never raises (see its docstring), so there is nothing to catch here and
+        # nothing it can do to this job's return value.
+        await _publish_if_configured(ctx, parsed_run_id, outcome)
         return "ok"
+
+
+async def _publish_if_configured(ctx: dict[Any, Any], run_id: UUID, outcome: CrawlOutcome) -> None:
+    """Publish this run's `llms.txt` to a repository, if the website has an active target.
+
+    Returns silently in the common case — no target, or publishing switched off for this
+    deployment. `PublishService.publish_run` makes both of those a cheap read and no network call.
+
+    **The `httpx.AsyncClient` is built here, per job, and closed here.** It is deliberately NOT
+    `ctx["http_client"]`: that one is the CRAWLER's client, built by `build_crawl_client` with an
+    SSRF-blocking transport and a `llms-text-bot` User-Agent, both of which are wrong for GitHub's
+    API (`app/features/publish/http_client.py` argues this in full). Per job rather than per worker
+    for the same no-singleton reason ARCHITECTURE.md §3.7 gives for the Storage client, and the
+    cost is one connection setup on the small fraction of runs that actually publish.
+    """
+    service = PublishService(ctx["db_pool"], WebsiteService(ctx["db_pool"]))
+    async with build_github_client() as client:
+        publication = await service.publish_run(
+            run_id=run_id,
+            llms_txt=outcome.llms_txt,
+            stats=outcome.stats,
+            client=client,
+        )
+
+    if publication is None:
+        return
+    logger.info(
+        "crawl_task: publication %s",
+        publication.status,
+        extra={
+            "publication_status": publication.status,
+            "pr_url": publication.pr_url,
+            "commit_sha": publication.commit_sha,
+        },
+    )
 
 
 async def schedule_tick(ctx: dict[Any, Any]) -> str:
