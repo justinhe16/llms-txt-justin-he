@@ -693,7 +693,12 @@ async def test_two_passes_that_never_overlap_still_enqueue_each_orphan_once(
         gate.install(monkeypatch)
 
         async def _second_after_commit() -> Any:
-            await gate.first_committed.wait()
+            # Bounded for the same reason `_LockRendezvous`'s wait is: an unbounded `wait()`
+            # here would hang the whole suite indefinitely if pass 1 died without ever
+            # leaving its `transaction()` block. Raising is right in THIS test — unlike the
+            # rendezvous, there is no lock cycle to break by proceeding, so a timeout means
+            # the gate itself is broken and the run should say so rather than stall.
+            await asyncio.wait_for(gate.first_committed.wait(), timeout=_OVERLAP_TIMEOUT_SECONDS)
             return await _reap(run_service, queue_pool)
 
         first, second = await asyncio.gather(_reap(run_service, queue_pool), _second_after_commit())
