@@ -307,6 +307,14 @@ async def test_a_javascript_shell_is_empty_but_keeps_its_title() -> None:
     deliberately does not null it just because the page carries no body. See this module's
     own comment, right where `extracted.title` is copied onto the returned `CrawledPage`, for
     why: nulling it would be branching on `is_empty`, which ARCHITECTURE.md §3.4 forbids.
+
+    `blocked_reason` is asserted `None` here too — a genuinely thin 200 page (this fixture
+    carries none of `internals/blocked.py`'s markers: no `cf-mitigated` header, no
+    `cloudflare` `server` header, no challenge-shaped `<title>`) is `is_empty` without ever
+    being blocked. `classify_block`'s rule 1 (any 2xx is never a block, unconditionally) makes
+    this the structural, not incidental, case: `is_empty` and `blocked_reason` are two
+    genuinely independent facts about a response, and this is the test that pins that a
+    response can be the former without ever being the latter.
     """
     fixture = _load_fixture("js_shell_page.html")
 
@@ -323,6 +331,7 @@ async def test_a_javascript_shell_is_empty_but_keeps_its_title() -> None:
     assert page.markdown == ""
     assert page.title == "Acme Console", "the title must survive even though the page is empty"
     assert page.description == "The Acme Console."
+    assert page.blocked_reason is None, "a genuinely thin 200 page is empty, never blocked"
 
 
 async def test_a_non_html_response_is_a_successful_fetch_with_nothing_extracted() -> None:
@@ -389,3 +398,86 @@ def test_looks_like_html_classifies_content_types(content_type: str | None, expe
     response = httpx.Response(200, headers=headers, content=b"<html></html>")
 
     assert _looks_like_html(response) is expected
+
+
+# --- WAF/CDN block detection wired into fetch_page -----------------------------------------
+
+
+async def test_an_ordinary_200_carries_no_blocked_reason() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="ok")
+
+    resolver = _fake_resolver({"public.test": [PUBLIC_IP]})
+    budget = ByteBudget(max_bytes=1_000)
+
+    async with _build_client(handler) as client:
+        page = await fetch_page(client, "http://public.test/", budget=budget, resolver=resolver)
+
+    assert page.blocked_reason is None
+
+
+async def test_a_cf_mitigated_header_is_a_successful_fetch_with_blocked_reason_challenge() -> None:
+    """A blocked response is never a raise — the same 'successful fetch, nothing to show for
+    it' contract a non-HTML or empty-extraction response already has."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, headers={"cf-mitigated": "challenge"}, text="blocked")
+
+    resolver = _fake_resolver({"public.test": [PUBLIC_IP]})
+    budget = ByteBudget(max_bytes=1_000)
+
+    async with _build_client(handler) as client:
+        page = await fetch_page(client, "http://public.test/", budget=budget, resolver=resolver)
+
+    assert page.status == 403
+    assert page.blocked_reason == "challenge"
+
+
+async def test_a_cloudflare_challenge_shaped_response_carries_blocked_reason_challenge() -> None:
+    """The rule-3 fixture, driven through `fetch_page` rather than `classify_block` directly —
+    the end-to-end proof this module actually wires `classify_block` in, mirroring
+    `test_an_html_response_is_extracted_into_title_description_and_markdown`'s own shape for
+    `extract_content`."""
+    fixture = _load_fixture("cloudflare_challenge.html")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, headers={"server": "cloudflare"}, html=fixture)
+
+    resolver = _fake_resolver({"public.test": [PUBLIC_IP]})
+    budget = ByteBudget(max_bytes=1_000_000)
+
+    async with _build_client(handler) as client:
+        page = await fetch_page(client, "http://public.test/", budget=budget, resolver=resolver)
+
+    assert page.blocked_reason == "challenge"
+
+
+async def test_a_bare_403_with_no_challenge_markers_carries_blocked_reason_denied() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, text="Forbidden")
+
+    resolver = _fake_resolver({"public.test": [PUBLIC_IP]})
+    budget = ByteBudget(max_bytes=1_000)
+
+    async with _build_client(handler) as client:
+        page = await fetch_page(client, "http://public.test/", budget=budget, resolver=resolver)
+
+    assert page.blocked_reason == "denied"
+
+
+async def test_block_classification_runs_regardless_of_content_type() -> None:
+    """`classify_block` is called unconditionally, unlike the HTML-gated extractor — a `401`
+    served with a JSON body (a common shape for an API-fronting WAF) still carries
+    `blocked_reason: "denied"`, even though `_looks_like_html` would say `False` for it."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"error": "unauthorized"})
+
+    resolver = _fake_resolver({"public.test": [PUBLIC_IP]})
+    budget = ByteBudget(max_bytes=1_000)
+
+    async with _build_client(handler) as client:
+        page = await fetch_page(client, "https://public.test/api", budget=budget, resolver=resolver)
+
+    assert page.blocked_reason == "denied"
+    assert page.title is None  # the extractor never ran — this is still not-HTML

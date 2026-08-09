@@ -61,11 +61,12 @@ import logging
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
 from app.core.settings import Settings
+from app.features.crawl.internals.blocked import BlockReason, merge_block_reason
 from app.features.crawl.internals.fetcher import (
     ByteBudget,
     ByteBudgetExceededError,
@@ -151,17 +152,30 @@ class CrawlResult:
 
     stats: dict[str, Any]
     """The exact shape `runs.stats` stores: `pages_crawled`, `pages_failed`,
-    `bytes_fetched`, `duration_ms`, `cap_hit`, and `pages_empty_content`. `pages_crawled` is
-    the key name the websites feature's reader already reads out of this column — see
-    `app.features.websites.internals.websites_reader` — so it is spelled exactly that way
-    here, not `len(pages)` renamed to something more natural in isolation.
+    `bytes_fetched`, `duration_ms`, `cap_hit`, `pages_empty_content`, `pages_blocked`, and
+    `blocked_reason`. `pages_crawled` is the key name the websites feature's reader already
+    reads out of this column — see `app.features.websites.internals.websites_reader` — so it
+    is spelled exactly that way here, not `len(pages)` renamed to something more natural in
+    isolation.
 
     `pages_empty_content` is counted here, alongside the other five, rather than in
     `internals/run_stats.py` — see that module's own docstring for the line it draws between
     the crawl loop's concerns and persistence-shaped ones. How many of the pages THIS LOOP
     fetched came back with no extractable content is a fact about the fetch, not about how
     the result gets stored, so it belongs on this dict the same way `pages_failed` and
-    `bytes_fetched` do."""
+    `bytes_fetched` do.
+
+    `pages_blocked` and `blocked_reason` (added by this feature's WAF-detection ticket) are
+    the identical kind of fact, for the identical reason: whether a page's response was a
+    detected access challenge or denial is something only THIS loop can know, because it is
+    the only code that saw every response as it arrived — `_note_block` below is where both
+    are updated. `pages_blocked` counts every fetched page, seed or frontier, whose response
+    `internals/blocked.py`'s `classify_block` matched; `blocked_reason` is those pages'
+    reasons folded through `merge_block_reason` into one run-level answer, `None` when nothing
+    this run fetched was blocked. See `internals/run_stats.py`'s `RUN_STATS_VERSION` 11
+    paragraph for how these two reach `runs.stats` unchanged, with no new keyword argument on
+    `build_run_stats` — they arrive already present in this dict and pass through its
+    `**crawl_stats` spread exactly as `pages_crawled` itself does."""
 
     cap_hit: str | None
     """`"pages"`, `"bytes"`, `"wall_clock"`, or `None` if the crawl exhausted its frontier
@@ -202,6 +216,49 @@ class RobotsDisallowedError(Exception):
     Deliberately its OWN type, following the rule `FetchError` and `ByteBudgetExceededError`
     already set for this feature: an exception lives in the module that raises it.
     """
+
+
+class AccessBlockedError(Exception):
+    """Raised (as `CrawlResult.seed_error`) when the SEED's own response is a detected WAF/CDN
+    access challenge or denial — `internals/blocked.py`'s `classify_block` returned a
+    `BlockReason` for it.
+
+    **Mirrors `RobotsDisallowedError` above, deliberately, down to the shape of this
+    docstring**: the decision this exception encodes is to HONOUR the block and fail the run,
+    never to attempt to get past it. This crawler does not solve interactive challenges,
+    render JavaScript, spoof or rotate its `User-Agent`, replay cookies, or route around a
+    block through a proxy — a WAF or a challenge saying no is a "no" this crawler accepts, the
+    same way a `robots.txt` `Disallow` is (CLAUDE.md's explicit scope note for this ticket;
+    ARCHITECTURE.md §11 records the same boundary). The user's one escape hatch is social: ask
+    the site operator to allowlist `llms-text-bot/0.1`
+    (`app.features.crawl.http_client.CRAWL_USER_AGENT`).
+
+    A blocked seed is deliberately treated as harshly as a seed genuinely offline: there is
+    nothing to build an artifact from, and a run that "completed" over a Cloudflare challenge
+    page's five-kilobyte JavaScript shell — reporting an index of zero pages while calling the
+    zero pages it excluded ones with "no extractable content" — is the exact false claim this
+    ticket exists to stop making. Retrying changes nothing: a WAF's challenge is deterministic
+    for a non-browser client and carries no `Retry-After`, so `_is_retryable`
+    (`app.features.crawl.service`) treats this as permanent by NOT listing it, the same
+    reasoning `RobotsDisallowedError`, `FetchError`, and `SsrfBlockedError` already get.
+    `app.features.crawl.service.CrawlService._safe_error_message` maps `.reason` to one of two
+    fixed strings via `_BLOCKED_MESSAGES` — no new database column, `runs.error` already being
+    free text.
+
+    **Known limitation, the same one `RobotsDisallowedError` states for itself: this sees the
+    response for whatever URL was actually fetched, after `fetch_page`'s own redirect
+    handling** — a site that redirects an allowed-looking seed straight into a challenge is
+    caught here just as reliably as one that serves the challenge on the configured URL
+    directly, because this reads the FINAL response, not the first one.
+    """
+
+    def __init__(self, reason: BlockReason, url: str) -> None:
+        super().__init__(f"seed blocked ({reason}): {url}")
+        self.reason = reason
+        """The `BlockReason` `internals/blocked.py`'s `classify_block` returned for the seed's
+        response — `"challenge"` or `"denied"`. Read by `_safe_error_message`
+        (`app.features.crawl.service`) to pick which of the two fixed, safe-to-display
+        strings `runs.error` gets."""
 
 
 async def crawl_site(
@@ -340,6 +397,8 @@ async def crawl_site(
     budget = budget if budget is not None else ByteBudget(limits.max_bytes)
     pages: list[CrawledPage] = []
     pages_failed = 0
+    pages_blocked = 0
+    blocked_reason: BlockReason | None = None
     cap_hit: str | None = None
     seed_error: Exception | None = None
 
@@ -369,6 +428,29 @@ async def crawl_site(
                 "crawl: hit the %s cap", hit, extra={"cap_hit": hit, "pages_crawled": len(pages)}
             )
 
+    def _note_block(reason: BlockReason) -> None:
+        """Record one page — seed or frontier — whose response `internals/blocked.py`'s
+        `classify_block` matched.
+
+        Called from both the SEED branch below (before `seed_error` is set to
+        `AccessBlockedError`) and `fetch_frontier_url` (in place of `pages.append`), so a
+        run's `pages_blocked`/`blocked_reason` reflect every blocked response this loop saw
+        regardless of which of the two ever led to a failed run. `merge_block_reason` is what
+        keeps `blocked_reason` deterministic across concurrent frontier fetches whose finish
+        order is not reproducible between two runs of the same crawl — see that function's own
+        docstring (`internals/blocked.py`).
+
+        Not guarded the way `_mark_cap_hit` explicitly is: two frontier tasks calling this at
+        "the same moment" is fine here, unlike a cap, because incrementing a counter and
+        folding a `merge_block_reason` call are each safe to run twice in a row with no
+        coordination — nothing about EITHER operation depends on which of two concurrent
+        callers reaches it first, so there is no result to protect a second caller from
+        corrupting.
+        """
+        nonlocal pages_blocked, blocked_reason
+        pages_blocked += 1
+        blocked_reason = merge_block_reason(blocked_reason, reason)
+
     async def fetch_frontier_url(url: str) -> None:
         nonlocal pages_failed
         async with semaphore:
@@ -390,6 +472,20 @@ async def crawl_site(
                 logger.warning("crawl: frontier fetch failed for %s", url, exc_info=True)
                 pages_failed += 1
                 return
+            # Counted, not appended — a blocked frontier page has nothing this run's artifact
+            # should list (a Cloudflare challenge shell is not the page it was asked for), but
+            # it is not a fetch FAILURE either: the request completed and got an honest answer.
+            # Never fails the run — see the module docstring's PER-191 "hitting a cap is a
+            # success" pattern, applied here to a WAF blocking a handful of a site's pages
+            # rather than to one of the six numeric caps.
+            if page.blocked_reason is not None:
+                # `CrawledPage.blocked_reason` is typed plain `str | None` (that field's own
+                # docstring explains why: `schemas.py` imports nothing from `internals/`), but
+                # every value it ever actually holds came from `classify_block`
+                # (`internals/blocked.py`) by way of `fetch_page` — this `cast` documents that
+                # invariant rather than widening `_note_block`'s own signature to `str`.
+                _note_block(cast(BlockReason, page.blocked_reason))
+                return
             pages.append(page)
 
     try:
@@ -404,33 +500,47 @@ async def crawl_site(
                 except Exception as exc:
                     seed_error = exc
                 else:
-                    pages.append(seed_page)
+                    if seed_page.blocked_reason is not None:
+                        # Honoured, not defeated — mirrors the `is_allowed` branch above, down
+                        # to sitting BEFORE `pages.append`. A blocked seed is never appended:
+                        # this run has nothing to build an artifact from,
+                        # `frontier_from_seed` is never reached (there is no seed page to
+                        # derive a fallback frontier from — this whole block is still the seed
+                        # fetch's own `else`), and `generate_llms_txt` is never called at all —
+                        # see `AccessBlockedError`'s own docstring for the reasoning. `cast`
+                        # for the identical reason the frontier branch above casts — see that
+                        # comment.
+                        reason = cast(BlockReason, seed_page.blocked_reason)
+                        _note_block(reason)
+                        seed_error = AccessBlockedError(reason, seed_url)
+                    else:
+                        pages.append(seed_page)
 
-                    # The frontier, from whichever of the two sources supplied one. The
-                    # `if not frontier` guard is what keeps them mutually exclusive rather
-                    # than additive — see `frontier_from_seed`'s own docstring — and it is
-                    # also why `frontier_from_seed` cannot be reached at all on the
-                    # seed-failure path above: this whole block is the seed fetch's `else`.
-                    frontier = list(extra_urls)
-                    if not frontier and frontier_from_seed is not None:
-                        frontier = list(frontier_from_seed(seed_page))
+                        # The frontier, from whichever of the two sources supplied one. The
+                        # `if not frontier` guard is what keeps them mutually exclusive rather
+                        # than additive — see `frontier_from_seed`'s own docstring — and it is
+                        # also why `frontier_from_seed` cannot be reached at all on the
+                        # seed-failure path above: this whole block is the seed fetch's `else`.
+                        frontier = list(extra_urls)
+                        if not frontier and frontier_from_seed is not None:
+                            frontier = list(frontier_from_seed(seed_page))
 
-                    # Truncated up front — but `cap_hit` is deliberately NOT set here yet.
-                    # Setting it before the gather below would make every truncated task's
-                    # own `if cap_hit is not None: return` check fire immediately, since that
-                    # same flag is what marks "stop early" — the truncated frontier would
-                    # never run at all. Whether truncation happened is remembered separately
-                    # (`frontier_was_truncated`) and only turned into `cap_hit` once the
-                    # truncated batch has actually been attempted, below.
-                    allowed = max(0, limits.max_pages - 1)
-                    frontier_was_truncated = len(frontier) > allowed
-                    frontier = frontier[:allowed]
+                        # Truncated up front — but `cap_hit` is deliberately NOT set here yet.
+                        # Setting it before the gather below would make every truncated task's
+                        # own `if cap_hit is not None: return` check fire immediately, since
+                        # that same flag is what marks "stop early" — the truncated frontier
+                        # would never run at all. Whether truncation happened is remembered
+                        # separately (`frontier_was_truncated`) and only turned into `cap_hit`
+                        # once the truncated batch has actually been attempted, below.
+                        allowed = max(0, limits.max_pages - 1)
+                        frontier_was_truncated = len(frontier) > allowed
+                        frontier = frontier[:allowed]
 
-                    if frontier:
-                        await asyncio.gather(*(fetch_frontier_url(url) for url in frontier))
+                        if frontier:
+                            await asyncio.gather(*(fetch_frontier_url(url) for url in frontier))
 
-                    if frontier_was_truncated and cap_hit is None:
-                        _mark_cap_hit("pages")
+                        if frontier_was_truncated and cap_hit is None:
+                            _mark_cap_hit("pages")
     except TimeoutError:
         _mark_cap_hit("wall_clock")
 
@@ -466,5 +576,14 @@ async def crawl_site(
         # free, with no extra plumbing — the persisted shape stays uniform across a
         # successful run's stats and a failed one's partial stats.
         "pages_empty_content": sum(1 for page in pages if page.is_empty),
+        # `pages_blocked`/`blocked_reason` (this feature's WAF-detection ticket) are the
+        # identical kind of loop-owned fact `pages_empty_content` is, for the identical
+        # reason: only this loop saw every response's status and headers as it arrived, seed
+        # included — `_note_block` above is what updates both, on the seed branch and inside
+        # `fetch_frontier_url` alike. `blocked_reason` is `None` — never an absent key — when
+        # nothing this run fetched was blocked, matching every other "0/None is data" field in
+        # this dict.
+        "pages_blocked": pages_blocked,
+        "blocked_reason": blocked_reason,
     }
     return CrawlResult(pages=pages, stats=stats, cap_hit=cap_hit, seed_error=seed_error)

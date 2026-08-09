@@ -145,7 +145,7 @@ async def test_success_writes_a_completed_row_with_artifact_storage_path_and_sta
     assert row["completed_at"] is not None
 
     stats = json.loads(row["stats"])
-    assert stats["version"] == 10
+    assert stats["version"] == 11
     assert stats["pages_crawled"] == 1
     assert "cap_hit" in stats
     assert stats["pages_empty_content"] == 1, "the ok_handler's body has no extractable content"
@@ -296,6 +296,7 @@ async def test_cap_hit_from_the_crawl_result_lands_in_the_stored_stats(
         description=None,
         markdown="",
         is_empty=True,
+        blocked_reason=None,
     )
     fake_result = CrawlResult(
         pages=[page],
@@ -306,6 +307,8 @@ async def test_cap_hit_from_the_crawl_result_lands_in_the_stored_stats(
             "duration_ms": 1,
             "cap_hit": "pages",
             "pages_empty_content": 0,
+            "pages_blocked": 0,
+            "blocked_reason": None,
         },
         cap_hit="pages",
         seed_error=None,
@@ -363,6 +366,7 @@ async def test_links_emitted_counts_the_indexed_pages_and_the_full_text_is_persi
             description=None,
             markdown=markdown,
             is_empty=is_empty,
+            blocked_reason=None,
         )
 
     fake_result = CrawlResult(
@@ -377,6 +381,8 @@ async def test_links_emitted_counts_the_indexed_pages_and_the_full_text_is_persi
             "duration_ms": 1,
             "cap_hit": None,
             "pages_empty_content": 1,
+            "pages_blocked": 0,
+            "blocked_reason": None,
         },
         cap_hit=None,
         seed_error=None,
@@ -418,7 +424,7 @@ async def test_partial_stats_survive_an_upload_failure(websites_db: Pool) -> Non
     assert row is not None
     stats = json.loads(row["stats"])
     assert stats["pages_crawled"] == 1
-    assert stats["version"] == 10
+    assert stats["version"] == 11
     # A failure row carries the same KEYS as a success row, at their hoisted defaults — the
     # shape `runs.stats` stores must not depend on how far a run got before it failed. The
     # four PER-180 counters are part of that same guarantee now: this suite's `_execute`
@@ -580,6 +586,7 @@ def _diff_page(path: str, *, title: str = "Page") -> CrawledPage:
         description=None,
         markdown="Real content, long enough to survive extraction's emptiness check here.",
         is_empty=False,
+        blocked_reason=None,
     )
 
 
@@ -1032,12 +1039,12 @@ async def test_a_site_with_no_sitemap_falls_back_to_the_links_on_its_seed_page(
     assert stats["urls_discovered"] == 3, "off-origin, mailto: and fragment-only never count"
     assert stats["urls_selected"] == 3
     assert stats["pages_crawled"] == 4
-    assert stats["version"] == 10, (
+    assert stats["version"] == 11, (
         "a new VALUE for an existing key is still not a new shape — PER-178 added "
-        '`discovery_source: "links"` and deliberately did not bump for it. This row reads 10 '
-        "because PER-180, PER-191, PER-193, PER-194, PER-196 and PER-201 each added new KEYS "
-        "after that, which are shape changes; the number moved for reasons that have nothing "
-        "to do with the value asserted above."
+        '`discovery_source: "links"` and deliberately did not bump for it. This row reads 11 '
+        "because PER-180, PER-191, PER-193, PER-194, PER-196, PER-201, and this repo's own "
+        "WAF-detection ticket each added new KEYS after that, which are shape changes; the "
+        "number moved for reasons that have nothing to do with the value asserted above."
     )
 
 
@@ -1355,6 +1362,7 @@ def _enrich_page(
         description=description,
         markdown=markdown,
         is_empty=False,
+        blocked_reason=None,
     )
 
 
@@ -1366,6 +1374,8 @@ def _crawl_stats(*, pages_crawled: int) -> dict[str, Any]:
         "duration_ms": 1,
         "cap_hit": None,
         "pages_empty_content": 0,
+        "pages_blocked": 0,
+        "blocked_reason": None,
     }
 
 
@@ -1421,7 +1431,7 @@ async def test_model_titles_reach_llms_txt_and_the_extracted_title_does_not(
     assert "Extracted Title Nobody Should See In The Artifact" not in row["llms_txt"]
 
     stats = json.loads(row["stats"])
-    assert stats["version"] == 10
+    assert stats["version"] == 11
     assert stats["pages_enriched"] == 1
     assert stats["enrich_failures"] == 0
 
@@ -2069,6 +2079,124 @@ async def test_a_run_whose_seed_is_disallowed_fails_with_a_specific_message(
     assert row["error"] == "This site's robots.txt disallows crawling this URL."
 
 
+# -----------------------------------------------------------------------------------------
+# WAF-detection ticket: a blocked SEED fails the run with a fixed, specific message
+# (mirroring robots.txt's own "seed disallowed" wiring above); a blocked FRONTIER page is
+# counted and the run still completes.
+# -----------------------------------------------------------------------------------------
+
+
+async def test_a_run_whose_seed_returns_a_challenge_fails_with_a_specific_message(
+    websites_db: Pool,
+) -> None:
+    """[Blocked — seed, challenge]. The seed IS fetched — unlike a robots-disallowed one,
+    there is no way to know in advance that a site will challenge this crawler — but its
+    response is a detected Cloudflare-style challenge, so the run fails with the fixed message
+    `_safe_error_message` maps `AccessBlockedError` to, and the reproduction this ticket is
+    named after (claude.ai's own `cf-mitigated` header) is exactly what this handler serves."""
+    _website_id, run_id = await _seed_pending_clean_origin(websites_db, "waf-seed-challenge")
+    storage = FakeStorage()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path in ("/sitemap.xml", "/sitemap_index.xml", "/robots.txt"):
+            return httpx.Response(403, headers={"cf-mitigated": "challenge"})
+        return httpx.Response(403, headers={"cf-mitigated": "challenge"}, text="blocked")
+
+    outcome = await _execute(websites_db, storage, run_id, handler)
+    assert outcome is None
+
+    row = await websites_db.fetchrow(
+        "SELECT status, error, stats, llms_txt, llms_full_txt FROM runs WHERE id = $1", run_id
+    )
+    assert row is not None
+    assert row["status"] == "failed"
+    error = row["error"]
+    assert isinstance(error, str)
+    assert error.startswith(
+        "This site returned an automated-traffic challenge (such as Cloudflare's managed "
+        "challenge) that this crawler (llms-text-bot) does not attempt to solve."
+    )
+    assert "llms-text-bot" in error, "the social escape hatch names this crawler by name"
+    # The block is recorded even though the run failed — `_note_block` runs on the seed
+    # branch before `seed_error` is even set (`internals/crawler.py`).
+    stats = json.loads(row["stats"])
+    assert stats["pages_blocked"] == 1
+    assert stats["blocked_reason"] == "challenge"
+    assert stats["pages_crawled"] == 0, "the blocked seed is never appended to pages"
+    # No artifact — `generate_llms_txt` is never reached for a blocked seed (there is no
+    # `pages` list to build one from), so there is no "Excludes N pages with no extractable
+    # content" sentence to have gotten wrong, and nothing is ever uploaded to Storage.
+    assert row["llms_txt"] is None
+    assert row["llms_full_txt"] is None
+    assert storage.calls == [], "a failed seed fetch never reaches the Storage upload step"
+
+
+async def test_a_run_whose_seed_is_denied_fails_with_a_specific_message(
+    websites_db: Pool,
+) -> None:
+    """[Blocked — seed, denied]. A bare 401/403 with no challenge markers — HTTP basic auth,
+    or an IP allowlist — is the OTHER user-visible behaviour change this ticket makes: a run
+    that previously "completed" with a useless artifact now fails, with a message distinct
+    from the challenge one."""
+    _website_id, run_id = await _seed_pending_clean_origin(websites_db, "waf-seed-denied")
+    storage = FakeStorage()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path in ("/sitemap.xml", "/sitemap_index.xml", "/robots.txt"):
+            return httpx.Response(401)
+        return httpx.Response(401, text="Unauthorized")
+
+    outcome = await _execute(websites_db, storage, run_id, handler)
+    assert outcome is None
+
+    row = await websites_db.fetchrow("SELECT status, error, stats FROM runs WHERE id = $1", run_id)
+    assert row is not None
+    assert row["status"] == "failed"
+    error = row["error"]
+    assert isinstance(error, str)
+    assert error.startswith("This site denied this crawler's request (llms-text-bot, 401 or 403)")
+    stats = json.loads(row["stats"])
+    assert stats["blocked_reason"] == "denied"
+
+
+async def test_a_blocked_frontier_page_does_not_fail_the_run(websites_db: Pool) -> None:
+    """[Blocked — frontier]. The seed lands cleanly; one of two sitemap-listed pages is
+    blocked. Unlike a blocked SEED, this does not fail the run — the same 'hitting a cap is a
+    success' reasoning ARCHITECTURE.md §3.4 already applies to the six crawl caps, applied
+    here to a WAF blocking a handful of a site's pages."""
+    _website_id, run_id = await _seed_pending_clean_origin(websites_db, "waf-frontier")
+    storage = FakeStorage()
+
+    sitemap_body = f"""<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>http://{_SEED_IP}/waf-frontier/ok</loc></url>
+  <url><loc>http://{_SEED_IP}/waf-frontier/challenged</loc></url>
+</urlset>"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/sitemap.xml":
+            return httpx.Response(
+                200, text=sitemap_body, headers={"Content-Type": "application/xml"}
+            )
+        if request.url.path in ("/sitemap_index.xml", "/robots.txt"):
+            return httpx.Response(404)
+        if request.url.path == "/waf-frontier/challenged":
+            return httpx.Response(403, headers={"cf-mitigated": "challenge"}, text="blocked")
+        return httpx.Response(200, text="hello world")
+
+    outcome = await _execute(websites_db, storage, run_id, handler)
+    assert outcome is not None
+
+    row = await websites_db.fetchrow("SELECT status, stats FROM runs WHERE id = $1", run_id)
+    assert row is not None
+    assert row["status"] == "completed"
+    stats = json.loads(row["stats"])
+    assert stats["pages_crawled"] == 2, "seed + /waf-frontier/ok — the challenged page is not"
+    assert stats["pages_failed"] == 0
+    assert stats["pages_blocked"] == 1
+    assert stats["blocked_reason"] == "challenge"
+
+
 async def test_a_crawl_delay_is_recorded_in_the_stored_stats(websites_db: Pool) -> None:
     """[Crawl-delay]. `robots.txt` declares `Crawl-delay: 3600`; the sitemap is empty and the
     seed page carries no links at all, so there is no frontier and the politeness gate is
@@ -2120,13 +2248,15 @@ async def test_an_unreadable_robots_txt_completes_the_run(websites_db: Pool) -> 
     assert stats["crawl_delay_ms"] == settings.crawl_politeness_delay_ms
 
 
-async def test_stats_version_is_ten(websites_db: Pool) -> None:
-    """[Observability]. A live row lands with `RUN_STATS_VERSION` 10 — the persistence-layer
+async def test_stats_version_is_eleven(websites_db: Pool) -> None:
+    """[Observability]. A live row lands with `RUN_STATS_VERSION` 11 — the persistence-layer
     companion to `tests/test_run_stats.py::test_run_stats_version_is_pinned`, which only
-    checks the constant itself. `max_pages` is asserted alongside it, because a version
-    number that moved without its key arriving would be the one failure this test exists to
-    catch and the constant-only test structurally cannot."""
-    _website_id, run_id = await _seed_pending_clean_origin(websites_db, "version-ten")
+    checks the constant itself. `max_pages` (version 10, PER-201) is asserted alongside it,
+    because a version number that moved without an earlier version's own key still arriving
+    would be the one failure this test exists to catch and the constant-only test structurally
+    cannot — a version-11 row carries every version-10 key too, `max_pages` included, not just
+    the two this ticket (`pages_blocked`, `blocked_reason`) adds on top."""
+    _website_id, run_id = await _seed_pending_clean_origin(websites_db, "version-eleven")
     storage = FakeStorage()
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -2140,5 +2270,7 @@ async def test_stats_version_is_ten(websites_db: Pool) -> None:
     row = await websites_db.fetchrow("SELECT stats FROM runs WHERE id = $1", run_id)
     assert row is not None
     stats = json.loads(row["stats"])
-    assert stats["version"] == 10
+    assert stats["version"] == 11
     assert stats["max_pages"] == settings.crawl_max_pages
+    assert stats["pages_blocked"] == 0
+    assert stats["blocked_reason"] is None

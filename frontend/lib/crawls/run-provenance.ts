@@ -128,9 +128,25 @@ export interface PageBudget {
 export interface FetchInfo {
   /** Whether the seed itself was fetched — `pagesCrawled > 0`. */
   seedFetched: boolean;
-  /** Pages fetched from the ranked frontier, NOT counting the seed. */
+  /** Pages fetched from the ranked frontier, NOT counting the seed, and NOT counting a
+   * blocked page — `internals/crawler.py`'s frontier loop counts a blocked page on `blocked`
+   * below instead of appending it to `CrawlResult.pages`, so it never reaches
+   * `pages_crawled` at all. */
   frontierFetched: number;
   failed: number;
+  /** `stats.pages_blocked` (`RUN_STATS_VERSION` 11) — how many of this run's fetched pages,
+   * seed included, were a detected WAF/CDN access challenge or denial
+   * (`internals/blocked.py`). `0` when this row predates version 11 or nothing was blocked;
+   * see `blockedReason` below for which kind. Render this row only when it is `> 0`, the same
+   * "zero segments are dropped from the legend" rule every other Fetch segment already
+   * follows. */
+  blocked: number;
+  /** `stats.blocked_reason` — `"challenge"` or `"denied"`, or `null` when nothing this run
+   * fetched was blocked (`blocked === 0`) or the row predates version 11. A SEED block fails
+   * the run outright, so on a `failed` run this is the reason the run failed, not merely a
+   * frontier-page count; `lib/crawls/provenance-copy.ts`'s `blockedReasonCopy` turns it into
+   * a sentence. */
+  blockedReason: string | null;
   /** Selected but never attempted — nonzero only when a cap ended the run before the whole
    * frontier was fetched. Render this row only when it is `> 0`. */
   notAttempted: number;
@@ -324,11 +340,17 @@ export function selectionSelected(selection: SelectionState): number | null {
  * `internals/crawler.py`'s own comment on why an empty `pages` list is exactly equivalent to
  * "the seed never landed": every later append happens after a successful seed fetch, so there
  * is no other way to end up with pages fetched at all without the seed being one of them.
- * `frontierFetched = Math.max(0, pagesCrawled - 1)`. `notAttempted = Math.max(0, urlsSelected -
- * frontierFetched - failed)` is nonzero only when a cap ended the run before the whole
- * selected frontier was fetched — render that row only when it is greater than zero.
- * `Math.max(0, …)` in both is a clamp against a stats row whose numbers disagree, the same
- * clamp rationale `stats-display.ts`'s `outcomeBreakdown` gives for its own remainder.
+ * `frontierFetched = Math.max(0, pagesCrawled - 1)`. **A blocked frontier page counts on
+ * `blocked` (`stats.pages_blocked`, `RUN_STATS_VERSION` 11), not on `frontierFetched`** —
+ * `internals/crawler.py`'s frontier loop counts it and leaves it out of `CrawlResult.pages`,
+ * the same "counted but not fetched-successfully" shape `failed` already has, so
+ * `notAttempted = Math.max(0, urlsSelected - frontierFetched - failed - blocked)` is the
+ * corrected reconciliation: every selected URL is now accounted for by exactly one of
+ * frontier-fetched, failed, blocked, or not-attempted. Nonzero only when a cap ended the run
+ * before the whole selected frontier was fetched — render that row only when it is greater
+ * than zero. `Math.max(0, …)` throughout is a clamp against a stats row whose numbers
+ * disagree, the same clamp rationale `stats-display.ts`'s `outcomeBreakdown` gives for its
+ * own remainder.
  *
  * ## The cap the Fetch stage cannot see
  *
@@ -371,6 +393,8 @@ export function runProvenance(run: Pick<RunDetail, "status" | "stats">): RunProv
 
   const pagesCrawled = runPagesCrawled(run);
   const failed = finiteNumber(stats.pages_failed) ?? 0;
+  const blocked = finiteNumber(stats.pages_blocked) ?? 0;
+  const blockedReason = typeof stats.blocked_reason === "string" ? stats.blocked_reason : null;
   const bytesFetched = finiteNumber(stats.bytes_fetched);
   const capHit = typeof stats.cap_hit === "string" ? stats.cap_hit : null;
 
@@ -388,7 +412,9 @@ export function runProvenance(run: Pick<RunDetail, "status" | "stats">): RunProv
   const seedFetched = pagesCrawled !== null && pagesCrawled > 0;
   const frontierFetched = pagesCrawled === null ? 0 : Math.max(0, pagesCrawled - 1);
   const notAttempted =
-    urlsSelected === null ? 0 : Math.max(0, urlsSelected - frontierFetched - failed);
+    urlsSelected === null
+      ? 0
+      : Math.max(0, urlsSelected - frontierFetched - failed - blocked);
 
   const index: IndexState =
     run.status !== "completed"
@@ -405,7 +431,16 @@ export function runProvenance(run: Pick<RunDetail, "status" | "stats">): RunProv
     selection: selectionState(stats, urlsDiscovered, urlsSelected, seedFetched),
     pageBudget: pageBudget(stats, urlsSelected, overLimit),
     overLimit,
-    fetch: { seedFetched, frontierFetched, failed, notAttempted, bytesFetched, capHit },
+    fetch: {
+      seedFetched,
+      frontierFetched,
+      failed,
+      blocked,
+      blockedReason,
+      notAttempted,
+      bytesFetched,
+      capHit,
+    },
     index,
   };
 }
