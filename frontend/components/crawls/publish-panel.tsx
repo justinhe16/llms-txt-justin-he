@@ -14,6 +14,7 @@ import type { Installation, Publication, PublishMode } from "@/lib/api/publish";
 import { ownerIdentity } from "@/lib/crawls/owner";
 import { publishStatusCopy } from "@/lib/crawls/publish-copy";
 import { useDeletePublishTarget } from "@/lib/query/use-delete-publish-target";
+import { useDisconnectInstallation } from "@/lib/query/use-disconnect-installation";
 import { useInstallations } from "@/lib/query/use-installations";
 import { usePublications } from "@/lib/query/use-publications";
 import { usePublishTarget } from "@/lib/query/use-publish-target";
@@ -91,12 +92,15 @@ export function PublishPanel({
       {connected.length === 0 ? (
         <ConnectPrompt disabledReason={disabledReason} />
       ) : (
-        <TargetForm
-          websiteId={websiteId}
-          installations={connected}
-          existing={target.data ?? null}
-          disabledReason={disabledReason}
-        />
+        <>
+          <TargetForm
+            websiteId={websiteId}
+            installations={connected}
+            existing={target.data ?? null}
+            disabledReason={disabledReason}
+          />
+          <ConnectedAccounts installations={connected} disabled={disabledReason !== null} />
+        </>
       )}
 
       {target.data !== null && target.data !== undefined && (
@@ -422,6 +426,60 @@ function TargetForm({
         )}
       </div>
     </form>
+  );
+}
+
+/**
+ * The connected accounts, with a way to disconnect each.
+ *
+ * A user must be able to undo the connection from the app they made it in — telling them to go to
+ * GitHub for it would be the kind of dead end this panel exists to avoid. It does not *uninstall*
+ * the App, though, and the copy says so: uninstalling is the user's own action in their GitHub
+ * settings, and an API that could revoke its own access on someone's behalf is a worse tool than
+ * one that is honest about the boundary. Disconnecting here forgets the installation and deletes
+ * every publish target that used it.
+ *
+ * Rendered below the form rather than above it: on the common path a user is here to configure a
+ * repository, and account management is the rarer errand.
+ */
+function ConnectedAccounts({
+  installations,
+  disabled,
+}: {
+  installations: Installation[];
+  disabled: boolean;
+}) {
+  const disconnect = useDisconnectInstallation();
+
+  return (
+    <div className="space-y-1.5 border-t border-border pt-3">
+      <p className="text-xs font-medium text-foreground">Connected GitHub accounts</p>
+      <ul className="space-y-1">
+        {installations.map((installation) => (
+          <li key={installation.id} className="flex items-center justify-between gap-3 text-xs">
+            <span className="min-w-0 truncate text-muted-foreground">
+              {installation.account_login}
+            </span>
+            {!disabled && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-6 px-2 text-xs"
+                disabled={disconnect.isPending}
+                onClick={() => disconnect.mutate(installation.id)}
+              >
+                Disconnect
+              </Button>
+            )}
+          </li>
+        ))}
+      </ul>
+      <p className="text-xs text-muted-foreground">
+        Disconnecting stops publishing and forgets the connection. To remove the app&apos;s access
+        entirely, uninstall it in your GitHub settings.
+      </p>
+    </div>
   );
 }
 
