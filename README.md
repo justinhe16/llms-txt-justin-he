@@ -317,7 +317,7 @@ Known debt: deleting a website does not delete its Storage objects. `runs` rows 
 
 ## Documentation
 
-Three documents at the repo root and no `docs/` directory
+Three documents at the repo root; `docs/` holds assets, not documents
 ([`ARCHITECTURE.md` §2](./ARCHITECTURE.md#2-repo-layout)). Adding a fourth means deleting or
 folding in another.
 
