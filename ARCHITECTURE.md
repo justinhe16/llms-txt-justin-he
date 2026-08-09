@@ -529,6 +529,22 @@ tickets deploy separately, so version 3 was already writing rows before discover
 folding the new keys into 3 would have left two different shapes stamped with the same version
 — exactly the ambiguity the field exists to prevent. See `RUN_STATS_VERSION`'s own docstring.
 
+**`SelectionResult.dropped` itself reaches `runs.stats` as of PER-196, at `RUN_STATS_VERSION`
+9.** The Output tab's provenance panel — a collapsed-by-default disclosure, "Show how this was
+built" — is its one reader
+(`frontend/components/crawls/crawl-provenance.tsx`), turning a run's discovery source, its
+selection funnel, its fetch counts, and its index counts into a plain-language explanation of
+how that run's seed URL became its `llms.txt`. Only rule KEYS travel from backend to frontend;
+the human label and the one-line explanation for each are frontend copy
+(`frontend/lib/crawls/provenance-copy.ts`), matched by hand to `/docs#selection` where that
+page glosses a rule and written directly from the rule's own predicate where it does not — the
+same "labels are presentation, not persistence" split CLAUDE.md #9 already draws for
+`internals/llms_txt.py`. `_RULE_ORDER` is the canonical order `dropped`'s keys render in
+because `jsonb` does not preserve the stored map's own key order — Postgres re-orders an
+object's keys on the way in, so a renderer that iterates the deserialized map directly renders
+rules in an order that silently drifts from run to run; the frontend drives its render loop
+from its own copy of that order instead (`provenance-copy.ts`'s `SELECTION_RULE_ORDER`).
+
 **Model-assisted per-page summarization, flag-gated as of PER-180.**
 `internals/enrich.py`'s `enrich_pages(client, pages, *, settings) -> EnrichmentResult` asks
 `claude-haiku-4-5` for a 3-4 word title and a 9-10 word description for every page whose
@@ -642,7 +658,10 @@ the SAME `ByteBudget` the page crawl does, under a fixed share of it, so `stats[
 "bytes"` and `stats["bytes_fetched"]` stay honest about the one run-wide counter both phases
 share; and nothing discovery can do — a missing sitemap, malformed XML, an SSRF refusal, an
 exhausted cap, or an unreadable `robots.txt` — ever fails the run itself, the same "hitting a
-cap is a success" rule as the crawl loop's own six caps, one level earlier.
+cap is a success" rule as the crawl loop's own six caps, one level earlier. The provenance
+panel's own `cap_hit` wording is bound by this same rule (PER-196): its Fetch stage reads
+"Ended on the page cap — the run fetched as many pages as its budget allows," never "stopped
+short" or a failure colour, for a `cap_hit` of `"pages"`, `"bytes"`, or `"wall_clock"` alike.
 
 ### 3.5 The database infrastructure layer
 
