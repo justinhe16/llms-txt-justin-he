@@ -113,6 +113,7 @@ llms-text-justin-he/
 ├── db/                  schema.prisma + migrations/ (Prisma CLI lives here)
 ├── supabase/            local Supabase stack config (config.toml, seed.sql)
 ├── scripts/             shell helpers used by the Makefile (dev.sh, local-env.sh)
+├── docs/                screenshots/ only — assets the README links to, not a prose tree
 ├── docker-compose.yml   local Redis only — Supabase is managed by its own CLI
 ├── Makefile             local dev commands — see CLAUDE.md "Commands"
 ├── .github/workflows/   path-filtered CI + deploy
@@ -123,8 +124,10 @@ llms-text-justin-he/
 
 Rules for the layout:
 
-- **Three documents at the repo root, no `docs/` directory.** Three files is the right size
-  for this project. Do not add a fourth document without deleting or folding in another.
+- **Three documents at the repo root; `docs/` holds assets, not documents.**
+  `docs/screenshots/` stores the images the README links to — it is not a second prose tree.
+  Three files is the right size for this project's documentation. Do not add a fourth document
+  without deleting or folding in another.
 - **Each top-level directory owns its own toolchain.** `frontend/` owns `package.json` and
   `tsconfig.json`; `backend/` owns `pyproject.toml`; `db/` owns the Prisma CLI dependency.
   There is no root-level package manifest and no monorepo tool (no workspaces, no Turborepo,
