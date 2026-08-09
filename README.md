@@ -264,6 +264,10 @@ in exactly one place:
 | `API_URL` | Vercel env | `https://llms-text-justin-he.fly.dev` — server-only, never `NEXT_PUBLIC_` |
 | `FLY_API_TOKEN` | GitHub Actions secrets | `fly tokens create deploy -a llms-text-justin-he`, scoped to this app alone |
 | `DIRECT_DATABASE_URL` | GitHub Actions secrets | The same string as `DATABASE_URL` |
+| `GITHUB_APP_ID` | Fly secrets | The App's settings page. Not a secret, but set alongside the key |
+| `GITHUB_APP_PRIVATE_KEY` | Fly secrets | The App's settings page → **Generate a private key**. Required only when `GITHUB_PUBLISH_ENABLED` is on |
+| `GITHUB_APP_SLUG` | Fly secrets | The last path segment of the App's public URL |
+| `NEXT_PUBLIC_GITHUB_APP_SLUG` | Vercel env | The same slug. Public by construction — it is in the App's own listing URL |
 
 `CRAWL_ENRICH_WITH_LLM` defaults off, and neither it nor `ANTHROPIC_API_KEY` is set in CI or in
 production today. With it off, nothing in the worker constructs an Anthropic client and every
@@ -272,10 +276,67 @@ landed. Turning it on requires setting BOTH: the key alone does nothing (`CrawlS
 reads it unless the flag is on), and the flag alone refuses to boot
 (`Settings.validate_required_secrets` demands the key the moment the flag is `true`).
 
+### Publishing to GitHub
+
+Optional, off by default, and a deployment with none of it configured is a correct deployment:
+`GITHUB_PUBLISH_ENABLED` gates the whole feature, and with it `false` nothing is read and nothing
+is required at boot. CI runs that way deliberately.
+
+Turning it on takes one manual step nothing in this repo can do for you — registering a GitHub App.
+
+**1. Register the App.** GitHub → Settings → Developer settings → **GitHub Apps** → New GitHub App.
+
+| Field | Value |
+| --- | --- |
+| Homepage URL | `https://llms-text-justin-he-gamma.vercel.app` |
+| Callback URL | `https://llms-text-justin-he-gamma.vercel.app/api/github/callback` |
+| Request user authorization (OAuth) during installation | on |
+| Webhook | **off** — nothing in this system listens for one |
+
+**Repository permissions — exactly two**, and no account permissions at all:
+
+- **Contents: Read and write** — the commit
+- **Pull requests: Read and write** — only needed for the default `pull_request` mode
+
+Nothing else. The install prompt a user sees lists what you asked for, and every extra permission
+is a reason for them to decline.
+
+**2. Generate a private key** at the bottom of the App's settings page. It downloads a `.pem`.
+
+**3. Set the secrets.** Never commit the key, never paste it into a PR or an issue, and never echo
+it in a script ([CLAUDE.md rule 1](./CLAUDE.md)). It mints tokens that can **write to a user's
+repository**, so a leak is a supply-chain problem — if it is ever exposed, revoking it on the App's
+page and generating a new one is mandatory.
+
+```bash
+fly secrets set GITHUB_PUBLISH_ENABLED=true -a llms-text-justin-he
+fly secrets set GITHUB_APP_ID=<the numeric id> -a llms-text-justin-he
+fly secrets set GITHUB_APP_SLUG=<the-app-slug> -a llms-text-justin-he
+fly secrets set GITHUB_APP_PRIVATE_KEY="$(cat ~/Downloads/<your-app>.private-key.pem)" -a llms-text-justin-he
+```
+
+Then set `NEXT_PUBLIC_GITHUB_APP_SLUG` to the same slug in Vercel, so the browser can build the
+install link.
+
+**What a user then does:** open a site's **Schedule** tab → **Connect a GitHub repository** →
+choose which repositories to grant on GitHub → pick a repository, branch and path → turn on
+**Publish on every successful run**. From then on, a run whose `llms.txt` differs from what the
+repository already has opens a pull request. A run that finds no change writes nothing and records
+`No change to publish`.
+
+**Nothing is stored but a pointer.** `github_installations` holds an installation id and an account
+name — no token, no key. Every repository write is authorized by a token minted from the App key at
+the moment it is needed, held in memory, and left to expire. Uninstalling the App in GitHub's own
+settings revokes access immediately, with nothing for this system to notice.
+
+**Local development:** leave `GITHUB_PUBLISH_ENABLED=false`. Publishing needs a registered App and
+a public callback URL, so it is not part of the local loop.
+
 ### Rotating
 
 - **Supabase keys** — regenerate in the dashboard, then update Fly secrets and Vercel env
 - **Redis** — `upstash redis reset-password --db-id <id>`, then re-set `REDIS_URL`
+- **GitHub App private key** — generate a new one on the App's settings page, set `GITHUB_APP_PRIVATE_KEY`, then delete the old key on GitHub. Both are valid until you delete the old one, so there is no window where publishing breaks
 - **Fly token** — `fly tokens revoke <id>`, re-create, `gh secret set FLY_API_TOKEN`
 - **Anthropic key** — revoke in the console, create a replacement, `fly secrets set`
 

@@ -15,6 +15,7 @@ import { useWebsite } from "@/lib/query/use-website";
 import { CrawlOwner } from "./crawl-owner";
 import { CrawlsError } from "./crawls-error";
 import { EnrichmentPanel } from "./enrichment-panel";
+import { PublishPanel } from "./publish-panel";
 import { OutputTab } from "./output-tab";
 import { RunNowButton } from "./run-now-button";
 import { RunStatusIndicator } from "./run-status-indicator";
@@ -210,6 +211,14 @@ export function WebsiteDetail({ websiteId }: { websiteId: string }) {
               {/* PER-194's opt-in toggle. No fifth tab — see EnrichmentPanel's own docstring
                   for why this lives here, beside the schedule, rather than on its own tab. */}
               <EnrichmentPanel
+                websiteId={websiteId}
+                ownerUserId={website?.user_id ?? null}
+                isOwner={isOwner}
+              />
+              {/* Publishing sits beside the schedule for the same reason the enrichment toggle
+                  does — and because a schedule and what it publishes are one feature read
+                  top to bottom. See PublishPanel's own docstring. */}
+              <PublishPanel
                 websiteId={websiteId}
                 ownerUserId={website?.user_id ?? null}
                 isOwner={isOwner}
