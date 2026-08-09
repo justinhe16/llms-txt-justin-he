@@ -7,8 +7,10 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { llmsTxtFilename } from "@/lib/crawls/run-display";
 import { saveTextFile } from "@/lib/crawls/save-text-file";
+import type { RunValidation } from "@/lib/crawls/validation";
 
 import { DownloadFullButton } from "./download-full-button";
+import { ValidationSummary } from "./validation-summary";
 
 /**
  * The `llms.txt` artifact itself: line numbers, a copy button, a download button, and
@@ -40,6 +42,7 @@ export function LlmsTxtViewer({
   content,
   origin,
   runId,
+  validation,
 }: {
   content: string;
   origin: string;
@@ -48,6 +51,13 @@ export function LlmsTxtViewer({
    * itself never reads it otherwise: the `llms.txt` Download button already has `content` in
    * hand and makes no request of its own. */
   runId: string;
+  /** This artifact's llmstxt.org conformance report, or `null` when the run carries none.
+   *
+   * Passed in already parsed rather than as `run.stats`, so this component never reads jsonb:
+   * `runValidation` (lib/crawls/validation.ts) owns every defensive check, and the one caller
+   * that has a `RunDetail` in hand is the one that calls it. A viewer that took `run` would be
+   * a viewer that needed to know what a run is. */
+  validation: RunValidation | null;
 }) {
   const codeRef = useRef<HTMLPreElement>(null);
 
@@ -122,6 +132,10 @@ export function LlmsTxtViewer({
           <DownloadFullButton runId={runId} origin={origin} />
         </div>
       </div>
+
+      {/* Between the toolbar and the text, so the verdict reads as being ABOUT the document
+          below it. Renders nothing when the run carries no report — see `runValidation`. */}
+      {validation !== null && <ValidationSummary validation={validation} />}
 
       {/*
         The ONLY scroll container in this component, and the reason the page body never

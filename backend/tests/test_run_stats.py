@@ -30,7 +30,10 @@ def test_run_stats_version_is_pinned() -> None:
     them: the two remaining reasons a fetched page never reaches the index — a non-2xx
     response `classify_block` declines to call a block, and a cross-origin redirect — so that
     `pages_crawled - links_emitted` is fully explained by named reasons rather than partly
-    attributed to whichever reason the panel happens to know. See `RUN_STATS_VERSION`'s
+    attributed to whichever reason the panel happens to know. An eighth bump, from 12 to 13,
+    added `validation` — the llmstxt.org conformance report `internals/validate.py` produces for
+    the index a run generated, `None` on every path that produced no index at all. See
+    `RUN_STATS_VERSION`'s
     own docstring for the full history, including why every one of those keys is a
     real, recorded value on every row from the version that added it onward —
     `llms_txt_bytes: 0`, `index_diff: None`, `enrich_unavailable_reason: None`, `dropped: {}`,
@@ -41,17 +44,17 @@ def test_run_stats_version_is_pinned() -> None:
     deliberately rather than by accident: `tests/test_run_persistence.py` only checks the
     version NUMBER a live row lands with, which would pass just as happily against a
     `RUN_STATS_VERSION` that was bumped again without anyone noticing this test existed."""
-    assert RUN_STATS_VERSION == 12
+    assert RUN_STATS_VERSION == 13
 
 
-def test_build_run_stats_passes_crawl_stats_through_unchanged_and_adds_twenty_keys() -> None:
+def test_build_run_stats_passes_crawl_stats_through_unchanged_and_adds_twenty_one_keys() -> None:
     """`crawl_stats` — including `pages_empty_content` — is spread into the result verbatim;
     `links_emitted`, `full_txt_truncated`, `discovery_source`, `urls_discovered`,
     `urls_selected`, `urls_robots_disallowed`, `dropped`, `max_pages`, `crawl_delay_ms`,
     `pages_enriched`, `enrich_failures`, `enrich_input_tokens`, `enrich_output_tokens`,
     `llms_txt_bytes`, `index_diff`, `enrich_requested`, `enrich_applied`,
-    `enrich_unavailable_reason`, `content_hashes`, and `version` are the only twenty keys
-    `build_run_stats` itself contributes."""
+    `enrich_unavailable_reason`, `content_hashes`, `validation`, and `version` are the only
+    twenty-one keys `build_run_stats` itself contributes."""
     crawl_stats = {
         "pages_crawled": 3,
         "pages_failed": 1,
@@ -82,6 +85,7 @@ def test_build_run_stats_passes_crawl_stats_through_unchanged_and_adds_twenty_ke
         enrich_applied=True,
         enrich_unavailable_reason=None,
         content_hashes={"https://example.com": "abc123"},
+        validation=None,
     )
 
     assert stats == {
@@ -105,6 +109,7 @@ def test_build_run_stats_passes_crawl_stats_through_unchanged_and_adds_twenty_ke
         "enrich_applied": True,
         "enrich_unavailable_reason": None,
         "content_hashes": {"https://example.com": "abc123"},
+        "validation": None,
         "version": RUN_STATS_VERSION,
     }
 
@@ -138,6 +143,7 @@ def test_index_diff_is_none_and_llms_txt_bytes_zero_on_a_failure_shaped_call() -
         enrich_applied=False,
         enrich_unavailable_reason=None,
         content_hashes={},
+        validation=None,
     )
 
     assert "llms_txt_bytes" in stats
@@ -175,6 +181,7 @@ def test_dropped_is_an_empty_map_on_a_failure_shaped_call() -> None:
         enrich_applied=False,
         enrich_unavailable_reason=None,
         content_hashes={},
+        validation=None,
     )
 
     assert "dropped" in stats
@@ -210,6 +217,7 @@ def test_links_emitted_is_recorded_as_passed_even_when_it_differs_from_pages_cra
         enrich_applied=False,
         enrich_unavailable_reason=None,
         content_hashes={},
+        validation=None,
     )
 
     assert stats["pages_crawled"] == 3
@@ -250,6 +258,7 @@ def test_build_run_stats_leaves_the_crawl_loops_own_keys_intact() -> None:
         enrich_applied=False,
         enrich_unavailable_reason="api_error",
         content_hashes={},
+        validation=None,
     )
 
     assert stats["pages_crawled"] == 1
@@ -307,6 +316,7 @@ def test_build_run_stats_carries_the_discovery_counters() -> None:
         enrich_applied=False,
         enrich_unavailable_reason=None,
         content_hashes={},
+        validation=None,
     )
 
     assert stats["discovery_source"] == "robots"
@@ -343,6 +353,7 @@ def test_build_run_stats_carries_the_selection_drop_breakdown() -> None:
         enrich_applied=False,
         enrich_unavailable_reason=None,
         content_hashes={},
+        validation=None,
     )
 
     assert stats["dropped"] == dropped
@@ -383,6 +394,7 @@ def test_build_run_stats_records_the_page_budget_even_when_nothing_hit_it() -> N
         enrich_applied=False,
         enrich_unavailable_reason=None,
         content_hashes={},
+        validation=None,
     )
 
     assert stats["max_pages"] == 40
@@ -418,6 +430,7 @@ def test_build_run_stats_carries_the_enrichment_counters() -> None:
         enrich_applied=True,
         enrich_unavailable_reason=None,
         content_hashes={},
+        validation=None,
     )
 
     assert stats["pages_enriched"] == 7
@@ -454,6 +467,7 @@ def test_build_run_stats_carries_the_robots_counters() -> None:
         enrich_applied=False,
         enrich_unavailable_reason=None,
         content_hashes={},
+        validation=None,
     )
 
     assert stats["urls_robots_disallowed"] == 2
@@ -498,6 +512,7 @@ def test_build_run_stats_carries_the_enrichment_intent_keys() -> None:
         enrich_applied=False,
         enrich_unavailable_reason=None,
         content_hashes={},
+        validation=None,
     )
     assert never_requested["enrich_requested"] is False
     assert never_requested["enrich_applied"] is False
@@ -515,6 +530,7 @@ def test_build_run_stats_carries_the_enrichment_intent_keys() -> None:
             enrich_applied=False,
             enrich_unavailable_reason=reason,
             content_hashes={},
+            validation=None,
         )
         assert unavailable["enrich_requested"] is True
         assert unavailable["enrich_applied"] is False
@@ -531,6 +547,7 @@ def test_build_run_stats_carries_the_enrichment_intent_keys() -> None:
         enrich_applied=True,
         enrich_unavailable_reason=None,
         content_hashes={"https://example.com": "abc123"},
+        validation=None,
     )
     assert applied["enrich_requested"] is True
     assert applied["enrich_applied"] is True

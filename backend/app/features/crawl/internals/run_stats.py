@@ -47,7 +47,7 @@ from typing import Any, Final
 
 logger = logging.getLogger(__name__)
 
-RUN_STATS_VERSION: Final = 12
+RUN_STATS_VERSION: Final = 13
 """Which definition of this whole dict's shape a stored row was written under — not just
 `links_emitted`'s meaning, but which KEYS a row of this version even has.
 
@@ -400,7 +400,35 @@ crawl met a WAF, and there is no per-page detail on either key for `_public_stat
 reason to redact — both are aggregate counts across the whole run, the same shape
 `pages_empty_content` already is.
 
-Every version-10 key keeps its version-10 meaning here."""
+Every version-10 key keeps its version-10 meaning here.
+
+**Version 13** rows add one key and redefine nothing: `validation`, the llmstxt.org conformance
+report `internals/validate.py`'s `validate_llms_txt` produces for the index this run generated
+— `{conforms, error_count, warning_count, findings, findings_truncated, structure, version}`,
+whose own inner `version` is `VALIDATION_VERSION` and is what tells a reader which set of
+CHECKS produced a stored `findings` list (see that constant's docstring for why it is a
+separate number from this one).
+
+**`null` on every path that never generated an index**, exactly as `index_diff` is and for the
+identical reason version 7 gives: a seed failure or any failure before `generate_llms_txt` ran
+has no artifact to check, and a `conforms: true` recorded for a document that does not exist
+would be the most misleading value in the whole dict. Absence is `null`, never a missing key.
+
+**Recorded rather than computed at read time**, which is the decision worth stating because
+the alternative is genuinely available here: `validate_llms_txt` is pure and cheap, so an API
+handler could re-check `runs.llms_txt` on every read instead. Storing it is what makes the
+report a fact about the run — a row keeps the verdict its own artifact earned under the checks
+that existed when it ran, and `VALIDATION_VERSION` dates that verdict. Re-checking on read
+would silently restate history every time a check was added, so a run that was clean in the UI
+last week would show findings this week with no artifact having changed. That is the same
+argument `llms_txt_bytes` makes for not being `length(llms_txt)` in SQL.
+
+**EXPOSED, not worker-only.** `runs/service.py`'s `_public_stats` does not strip it — the
+whole point of the block is that the user sees whether their artifact conforms, and it carries
+no per-page detail to redact. The one thing it does carry from the crawled site is a bounded
+excerpt of an offending line inside a finding's `message`
+(`MAX_MESSAGE_EXCERPT_CHARS`), which is the site's own published text and already appears in
+`llms_txt` itself."""
 
 
 def build_run_stats(
@@ -425,6 +453,7 @@ def build_run_stats(
     enrich_applied: bool,
     enrich_unavailable_reason: str | None,
     content_hashes: dict[str, str],
+    validation: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """Combine `crawl_stats` (from `CrawlResult.stats`) with the two numbers only the
     artifacts know, the three only the discovery step knows, the two only `robots.txt`
@@ -602,6 +631,7 @@ def build_run_stats(
         "enrich_applied": enrich_applied,
         "enrich_unavailable_reason": enrich_unavailable_reason,
         "content_hashes": content_hashes,
+        "validation": validation,
         "version": RUN_STATS_VERSION,
     }
     # "Generation complete, with stats" — passed as `extra=stats` rather than folded into the

@@ -17,6 +17,7 @@ import { useRun } from "@/lib/query/use-run";
 import { blockedReasonCopy } from "@/lib/crawls/provenance-copy";
 import { rowStatusFromRunStatus } from "@/lib/crawls/row-status";
 import { selectRunToShow } from "@/lib/crawls/select-run";
+import { runValidation } from "@/lib/crawls/validation";
 import { cn } from "@/lib/utils";
 
 import { CrawlProvenance } from "./crawl-provenance";
@@ -358,5 +359,16 @@ function RunArtifact({
   }
 
   // State 4 of 4: success.
-  return <LlmsTxtViewer content={run.llms_txt} origin={origin} runId={runId} />;
+  //
+  // `runValidation` is called HERE, at the one place that holds a `RunDetail`, rather than
+  // inside the viewer — the viewer takes the parsed report and never touches `stats` (see its
+  // own prop docstring).
+  return (
+    <LlmsTxtViewer
+      content={run.llms_txt}
+      origin={origin}
+      runId={runId}
+      validation={runValidation(run)}
+    />
+  );
 }

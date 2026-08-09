@@ -144,6 +144,7 @@ from app.features.crawl.internals.run_stats import build_run_stats
 from app.features.crawl.internals.sitemap import DiscoverySource, discover_sitemap_urls
 from app.features.crawl.internals.ssrf import SsrfBlockedError
 from app.features.crawl.internals.url_ranking import DiscoveredUrl, SelectionResult, select_urls
+from app.features.crawl.internals.validate import validate_llms_txt
 from app.features.crawl.schemas import CrawledPage, CrawlOutcome
 from app.features.runs.schemas import RunDetailResponse
 from app.features.runs.service import RunService
@@ -558,6 +559,13 @@ class CrawlService:
         # run got, and that now includes whether it got as far as diffing its own index.
         llms_txt_bytes = 0
         index_diff: dict[str, Any] | None = None
+        # And once more for `validation` (`RUN_STATS_VERSION` 13), which is `None` rather than
+        # a "conforms, no findings" report on every path that never generated an index. The
+        # distinction is the whole reason this is hoisted as `None` and not as an empty report:
+        # a run that produced no artifact has nothing to be conformant ABOUT, and recording a
+        # clean verdict for a document that does not exist would be the most misleading value
+        # in the dict.
+        validation: dict[str, Any] | None = None
         # PER-194's own hoisted locals, same reasoning: `enrich_requested` is set the moment
         # the website is fetched (below) and stays whatever it was on every later path;
         # `enrich_applied` and `enrich_unavailable_reason` stay at their "never asked, never
@@ -785,6 +793,7 @@ class CrawlService:
                         enrich_applied=enrich_applied,
                         enrich_unavailable_reason=enrich_unavailable_reason,
                         content_hashes=content_hashes,
+                        validation=validation,
                     ),
                 )
             else:
@@ -906,6 +915,19 @@ class CrawlService:
                 # `llms_txt` and `urls_discovered`, both already in hand, so there is no
                 # reason to delay it behind work it does not depend on.
                 llms_txt_bytes = len(llms_txt.encode())
+                # Checked here, one line after the artifact exists and before anything
+                # downstream consumes it, because the report is a fact about THIS index and
+                # nothing later in this branch can change what it says. Pure and cheap — no
+                # network, no transaction, nothing to order it against — so it sits beside the
+                # other measurement of the same string rather than being deferred.
+                #
+                # A finding does NOT fail the run, and must not be made to. The artifact this
+                # describes is stored either way: a malformed index is still the index this
+                # code generated, and failing the run would replace a user's imperfect
+                # artifact with no artifact at all while hiding the generator bug that caused
+                # it. `internals/validate.py`'s "it validates, and it does not repair"
+                # paragraph is the other half of this rule.
+                validation = validate_llms_txt(llms_txt)
                 # `result.pages`, never `artifact_pages` — enrichment rewrites title and
                 # description and never markdown, so the two produce identical hashes here,
                 # but reading the original, pre-enrichment list is what makes "the body
@@ -977,6 +999,7 @@ class CrawlService:
                     enrich_applied=enrich_applied,
                     enrich_unavailable_reason=enrich_unavailable_reason,
                     content_hashes=content_hashes,
+                    validation=validation,
                 )
                 await self._runs.record_success(
                     run_id,
@@ -1037,6 +1060,7 @@ class CrawlService:
                     enrich_applied=enrich_applied,
                     enrich_unavailable_reason=enrich_unavailable_reason,
                     content_hashes=content_hashes,
+                    validation=validation,
                 )
                 if result is not None
                 else None

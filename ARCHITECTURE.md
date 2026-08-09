@@ -690,6 +690,43 @@ per-bucket series gains `runs_compared`/`pages_added`/`pages_removed` (real zero
 a new `latest` field carries the newest completed run's own diff, window-scoped like
 `last_run_at`.
 
+**Checking the generated index against llmstxt.org.** `internals/validate.py`'s
+`validate_llms_txt` is a fifth model-free, pure module in this feature, alongside
+`run_stats.py`, `llms_txt.py`, `url_ranking.py`, and `index_diff.py`. It takes a `str` and never
+a `list[CrawledPage]`, and that narrowness is the design rather than a convenience: this module
+is an INDEPENDENT description of the format, so it must not be able to agree with `llms_txt.py`
+by sharing its code. Nothing ties the two together but
+`tests/test_llms_txt_validate.py::test_generated_index_is_clean`, which runs the real generator
+over adversarial metadata and requires zero findings — the drift gate, and the same role
+`test_parse_index_round_trips_generate_llms_txt` already plays for `index_diff.py`'s own reverse
+parser.
+
+**It validates and it does not repair, and a finding cannot fail a run.** `CrawlService.
+execute_run` calls it one line after `generate_llms_txt`, inside the same no-transaction window
+§5.1 already grants the crawl, the upload, enrichment, and the diff; the artifact is stored
+either way. A malformed index is still the index this code generated, and failing the run would
+replace a user's imperfect artifact with no artifact at all while hiding the generator bug that
+produced it. Nothing downstream may rewrite the text at this seam either — a validator that
+silently corrected its input would report success for a document nobody generated.
+
+**Two severities, because the spec is permissive.** llmstxt.org makes the H1 its only
+requirement, so `# Acme` alone is fully conformant and useless. An `error` is a stated spec
+violation and clears `conforms`; a `warning` is permitted-but-worse (no summary blockquote, a
+section with no links, a relative URL) and leaves `conforms` true. `conforms` therefore means
+"no errors", never "no findings", and the UI says both — `frontend/lib/crawls/validation.ts`
+turns the block into three verdicts (`clean` / `warnings` / `errors`) and
+`components/crawls/validation-summary.tsx` renders them as a strip between the artifact's
+toolbar and its text, findings collapsed by default. A run carrying no report renders nothing,
+which is what keeps every pre-ticket run from reading as a pass.
+
+The result lands in `runs.stats["validation"]` at `RUN_STATS_VERSION` **13**, carrying its own
+inner `VALIDATION_VERSION` — a separate number precisely because `RUN_STATS_VERSION` moves
+whenever any key changes, and a reader of a stored `findings` list needs to know when the CHECKS
+changed. `null` on every path that generated no index, exactly as `index_diff` is. Stored rather
+than recomputed on read: the report is a fact about the run, and re-checking a historical
+artifact under today's checks would silently restate history every time a check was added. No
+API schema change — `stats` is passthrough jsonb, and `_public_stats` does not strip this key.
+
 **PER-194 retrofits this diff onto a world where enrichment can rewrite a page's title and
 description independently of the crawl that found it.** Enrichment touches title and
 description alone, never a page's markdown, the URL set, or discovery — so `pages_changed`/
