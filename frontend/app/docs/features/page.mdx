@@ -106,6 +106,25 @@ summarization and didn't get it still completes, using the titles and descriptio
 already produced, and its row on the Runs and Output tabs carries an **Enrichment
 unavailable** badge.
 
+## Validation
+
+Every generated `llms.txt` is checked against the [llmstxt.org](https://llmstxt.org) spec, and
+the Output tab reports the verdict directly above the artifact: **Valid llms.txt**, **Valid
+llms.txt · 2 notes**, or **1 spec error**. Findings open behind **Show details**, each naming
+the line it is about.
+
+Two severities, because the spec is permissive — an H1 is the only thing it requires, so a file
+containing nothing else is valid and useless. An **error** is a violation of something the spec
+states: no H1, a second H1, a summary blockquote out of order, a list item with no
+`[name](url)`, notes not introduced by a `:`. A **note** is permitted and still worse: no
+summary blockquote, a section with no links, a relative URL. "Valid" means no errors — never no
+notes, which is why the count sits beside the verdict instead of inside it.
+
+The check never changes the file and never fails a run. A malformed index is still the index
+that was generated, and the report is stored with the run, so an older run keeps the verdict it
+earned under the checks that existed when it ran. Runs from before this shipped show no strip
+at all rather than a pass.
+
 ## Trends
 
 Trends is the last of four tabs on a website's page (`/crawls/{id}`). As of a recent rework
