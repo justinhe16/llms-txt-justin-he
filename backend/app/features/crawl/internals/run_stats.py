@@ -7,7 +7,8 @@ facts about the ARTIFACTS the crawl loop cannot know about itself — how many l
 generated index actually lists, and how many page bodies the full-text expansion had to cut;
 and three facts about what happened BEFORE the crawl loop ran at all — which discovery entry
 point produced the frontier, how many URLs it found, and how many survived ranking
-(`internals/sitemap.py`, `internals/url_ranking.py`). This module is where all three are
+(`internals/sitemap.py`, `internals/url_ranking.py`) — plus the page budget all of it ran
+under, which is a fact about the run's CONFIGURATION rather than about anything it did. This module is where all three are
 combined into the one `dict` `RunService.record_success`/`record_failure` persist as jsonb.
 
 **Why this lives here and not inside `internals/crawler.py`.** `CrawlResult.stats` is the
@@ -27,6 +28,11 @@ something the crawl loop is structurally incapable of reporting:
   whether the result came from a sitemap, a `robots.txt` directive, a page's own links, or
   nowhere at all; that is exactly the seam its own module docstring describes, and keeping
   these three out of `CrawlResult.stats` is what preserves it.
+* `max_pages` is a fact about the run's CONFIGURATION — the page budget everything above
+  ran under. The crawl loop knows it (`CrawlLimits.max_pages`) but has no reason to report a
+  cap it did not hit, and the frontier the loop was handed was already truncated to it before
+  the loop started; see `RUN_STATS_VERSION`'s version-10 paragraph for why that combination
+  is exactly what makes this key necessary.
 * `version` only exists because a stored jsonb value outlives the code that wrote it.
 
 Building the persisted shape here, one call site away from the write path, keeps
@@ -41,7 +47,7 @@ from typing import Any, Final
 
 logger = logging.getLogger(__name__)
 
-RUN_STATS_VERSION: Final = 9
+RUN_STATS_VERSION: Final = 10
 """Which definition of this whole dict's shape a stored row was written under — not just
 `links_emitted`'s meaning, but which KEYS a row of this version even has.
 
@@ -279,7 +285,43 @@ this key into 8 would leave two shapes both stamped `8` — the same argument ve
 and 8 each make for themselves, and the same one this paragraph is now making for a fifth
 time.
 
-Every version-8 key keeps its version-8 meaning here."""
+Every version-8 key keeps its version-8 meaning here.
+
+**Version 10** rows add one key and redefine nothing (PER-201): `max_pages` is
+`Settings.crawl_max_pages` as it stood when this run executed — the run's whole page budget,
+seed included.
+
+**It is recorded rather than derived because it is the one number in this dict that is not a
+measurement.** Every other key here is something a run DID; this one is the ceiling it was
+allowed to do it under, and a reader that wants to say "99 of 99 selected" needs the ceiling
+to say it against. Nothing else on the row carries it. `urls_selected` alone cannot: a run
+that selected 99 of an allowed 99 and a run that selected 99 of an allowed 400 record the
+identical `urls_selected`, and only the first one's remaining candidates were dropped for
+lack of budget rather than for anything about the URLs themselves.
+
+**Derivation gets it right only when the budget actually bound.** `select_urls` is called with
+`limit=max_pages - 1` (`CrawlService.execute_run`), and its `"over_limit"` rule fires only
+once `len(selected)` has reached that limit — so on any row where `dropped["over_limit"] > 0`,
+`urls_selected == max_pages - 1` exactly, and the budget is recoverable as
+`urls_selected + 1`. On every other row it is not recoverable at all. That derivation is what
+`frontend/lib/crawls/run-provenance.ts` falls back to for version-9-and-earlier rows, and its
+one-sided validity is precisely why version 10 records the number instead of leaving every
+reader to reimplement a rule that silently has no answer half the time.
+
+**Why `max_pages` and not the other five caps.** `CrawlLimits` names six
+(`app.core.settings`), and the other five — bytes, wall clock, request timeout, concurrency,
+politeness delay — are already accounted for on the row wherever they can bind: `cap_hit`
+names whichever of them ended the crawl, and `crawl_delay_ms` records the politeness gap in
+force. The page budget is the one cap that can be fully consumed **without `cap_hit` ever
+naming it**, because `select_urls` truncates the frontier to `max_pages - 1` before
+`crawl_site` ever sees it, so `internals/crawler.py`'s own `frontier_was_truncated` check
+never fires and the run reports `cap_hit: null` having spent every page it had. Recording the
+budget is what lets a reader tell that run apart from one that genuinely had room to spare.
+
+Why 10 and not folded into 9: PER-196 is already merged and writing version-9 rows — the same
+argument versions 4, 6, 7, 8 and 9 each make for themselves, now for a sixth time.
+
+Every version-9 key keeps its version-9 meaning here."""
 
 
 def build_run_stats(
@@ -292,6 +334,7 @@ def build_run_stats(
     urls_selected: int,
     urls_robots_disallowed: int,
     dropped: dict[str, int],
+    max_pages: int,
     crawl_delay_ms: int,
     pages_enriched: int,
     enrich_failures: int,
@@ -391,6 +434,11 @@ def build_run_stats(
             (`urls_discovered == urls_selected + sum(dropped.values())`) it and
             `urls_discovered`/`urls_selected` above satisfy together. `{}` is a real recorded
             value, not an absent key — see `RUN_STATS_VERSION`'s version-9 paragraph.
+        max_pages: `Settings.crawl_max_pages` as it stood when this run executed — the whole
+            page budget, seed included, and therefore `max_pages - 1` as the `limit`
+            `url_ranking.select_urls` was given. Recorded, never derived; see
+            `RUN_STATS_VERSION`'s version-10 paragraph for why `urls_selected` cannot stand in
+            for it and why this is the one cap of the six that needs its own key.
         crawl_delay_ms: The politeness gap this run's crawl phase actually used, in
             milliseconds — `internals/robots.py`'s `effective_crawl_delay_ms(configured_ms,
             robots.crawl_delay_s)`. See `RUN_STATS_VERSION`'s own version-6 paragraph for why
@@ -444,11 +492,11 @@ def build_run_stats(
     Returns:
         `crawl_stats` spread first, followed by `links_emitted`, `full_txt_truncated`,
         `discovery_source`, `urls_discovered`, `urls_selected`, `urls_robots_disallowed`,
-        `dropped`, `crawl_delay_ms`, `pages_enriched`, `enrich_failures`,
+        `dropped`, `max_pages`, `crawl_delay_ms`, `pages_enriched`, `enrich_failures`,
         `enrich_input_tokens`, `enrich_output_tokens`, `llms_txt_bytes`, `index_diff`,
         `enrich_requested`, `enrich_applied`, `enrich_unavailable_reason`, `content_hashes`,
         and `version`. `crawl_stats`'s own keys come first and are never overwritten by the
-        nineteen added here, because none of those nineteen names is a key `CrawlResult.stats`
+        twenty added here, because none of those twenty names is a key `CrawlResult.stats`
         has ever produced.
     """
     stats = {
@@ -460,6 +508,7 @@ def build_run_stats(
         "urls_selected": urls_selected,
         "urls_robots_disallowed": urls_robots_disallowed,
         "dropped": dropped,
+        "max_pages": max_pages,
         "crawl_delay_ms": crawl_delay_ms,
         "pages_enriched": pages_enriched,
         "enrich_failures": enrich_failures,

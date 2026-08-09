@@ -69,9 +69,10 @@ class RunListItemResponse(BaseModel):
     because it is a `{normalized_url: content_hash}` map bounded by `Settings.crawl_max_pages`
     that can run to tens of kilobytes per row, and this endpoint is polled every three seconds
     while a run is active. Every other key `internals/run_stats.py`'s `build_run_stats` writes
-    is present unchanged — `dropped` (`{rule: count}`, `RUN_STATS_VERSION` 9, PER-196)
-    included: the per-rule selection breakdown the Output tab's provenance panel renders,
-    absent on any row written before that version. Its key order is NOT
+    is present unchanged — `dropped` (`{rule: count}`, `RUN_STATS_VERSION` 9, PER-196) and
+    `max_pages` (`RUN_STATS_VERSION` 10, PER-201) included: the per-rule selection breakdown
+    the Output tab's provenance panel renders, and the page budget it renders that breakdown
+    against, each absent on any row written before its own version. Its key order is NOT
     `internals/url_ranking.py`'s `_RULE_ORDER` once it has been through this jsonb column —
     Postgres re-orders an object's keys on the way in — so a reader that cares about order
     re-imposes `_RULE_ORDER` itself rather than trusting what comes back. Typed loosely

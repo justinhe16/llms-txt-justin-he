@@ -19,8 +19,10 @@ import {
 } from "@/components/ui/table";
 import type { RunDetail } from "@/lib/api/runs";
 import {
-  capHitCopy,
   discoverySourceCopy,
+  fetchCapNote,
+  PROVENANCE_BUDGET_LABEL,
+  PROVENANCE_BUDGET_UNIT,
   PROVENANCE_BYTES_LABEL,
   PROVENANCE_HEADINGS,
   PROVENANCE_PREVIEW,
@@ -29,6 +31,8 @@ import {
   PROVENANCE_SUMMARY,
   SELECTION_DOCS_LINK,
   SELECTION_STATE_COPY,
+  selectionBudgetNote,
+  selectionBudgetSpareNote,
   selectionRuleCopy,
   stageUnit,
 } from "@/lib/crawls/provenance-copy";
@@ -36,6 +40,7 @@ import {
   formatBytes,
   runProvenance,
   selectionSelected,
+  type PageBudget,
   type RunProvenance,
   type SelectionState,
 } from "@/lib/crawls/run-provenance";
@@ -82,6 +87,20 @@ import { EmptyCell } from "./empty-cell";
  * | present, `dropped` absent AND no totals either | all four stages; Selection says nothing about selection was recorded |
  * | present, `urls_discovered === 0` | all four stages; Discovery and Selection agree on whether the seed itself was crawled, and never claim it was when it was not |
  * | present, a real breakdown | all four stages, the per-rule table under the Selection bar |
+ *
+ * ## The page budget, and the two sentences that depend on it
+ *
+ * Selection carries a `Page budget` line in the same slot Fetch puts its byte total, and — on
+ * a run where `over_limit` fired — a sentence saying how many URLs were ranked, how many the
+ * budget had room for, and that no run gets more. Both come from `provenance.pageBudget`,
+ * which is `stats.max_pages` on a `RUN_STATS_VERSION` 10 row and a narrow derivation on an
+ * older one (`lib/crawls/run-provenance.ts`'s `PageBudget`); a run whose budget cannot be
+ * established renders neither, rather than a guess.
+ *
+ * The Fetch stage depends on the same signal for the opposite reason. `cap_hit: null` is what
+ * a budget-saturated run records — always, on any site larger than the budget — so the stage's
+ * closing sentence goes through `fetchCapNote`, not `capHitCopy`, and stops claiming the run
+ * "finished before any budget ran out" directly beneath a table saying otherwise.
  *
  * A failed run is not a sixth state of this component — it renders whichever of the four
  * stages its own partial `stats` describe, exactly as the ticket's own States section asks
@@ -268,9 +287,21 @@ function funnelStages(provenance: RunProvenance, status: RunDetail["status"]): F
       icon: ListFilterIcon,
       headline: selected,
       unit: PROVENANCE_STAGE_UNITS.selection,
-      subject: null,
+      // The same `label + value` slot the Fetch stage puts its byte total in — the two stages
+      // that ran against a configured number present it identically, rather than one of them
+      // burying it in prose.
+      subject:
+        provenance.pageBudget === null ? null : (
+          <span className="text-muted-foreground">
+            {PROVENANCE_BUDGET_LABEL}{" "}
+            <span className="tabular-nums text-foreground">
+              {provenance.pageBudget.maxPages.toLocaleString()}{" "}
+              {stageUnit(PROVENANCE_BUDGET_UNIT, provenance.pageBudget.maxPages)}
+            </span>
+          </span>
+        ),
       segments: selectionSegments(selection),
-      note: selectionNote(selection),
+      note: selectionNote(selection, provenance.pageBudget, provenance.overLimit),
       detail: <SelectionRules selection={selection} />,
     },
     {
@@ -299,11 +330,14 @@ function funnelStages(provenance: RunProvenance, status: RunDetail["status"]): F
       ],
       // A failed run names its failure rather than a cap that never actually ended it — a run
       // that died mid-fetch did not "finish before any budget ran out", which is what
-      // `capHitCopy(null)` would have claimed.
+      // `capHitCopy(null)` would have claimed. `fetchCapNote` is what rules out the OTHER way
+      // that same sentence goes wrong: a completed run whose page budget was spent at
+      // selection also reports `cap_hit: null`, and structurally always will — see that
+      // function's own docstring.
       note:
         status === "failed"
           ? "This run failed before fetching finished."
-          : capHitCopy(fetch.capHit),
+          : fetchCapNote(fetch.capHit, provenance.overLimit),
       detail: null,
     },
     {
@@ -345,7 +379,21 @@ function selectionSegments(selection: SelectionState): Segment[] {
   }
 }
 
-function selectionNote(selection: SelectionState): string | null {
+/**
+ * The Selection stage's sentence.
+ *
+ * The `"breakdown"` arm is where PER-201 lands, and the ordering inside it is the point: the
+ * budget sentence outranks `nothingDropped` and outranks rendering nothing at all, because on
+ * a run where `over_limit` fired it is the only line that answers the question the table
+ * directly above it provokes — whether those URLs failed something, and whether more could
+ * have got through. The per-rule table says WHAT dropped them; this says the cut was a
+ * position in a queue rather than a bar to clear, and that no run clears it.
+ */
+function selectionNote(
+  selection: SelectionState,
+  budget: PageBudget | null,
+  overLimit: number | null
+): string | null {
   switch (selection.kind) {
     case "unavailable":
       return SELECTION_STATE_COPY.unavailable;
@@ -356,9 +404,22 @@ function selectionNote(selection: SelectionState): string | null {
     case "totals_only":
       return SELECTION_STATE_COPY.totalsOnly;
     case "breakdown":
+      if (budget !== null && overLimit !== null && overLimit > 0) {
+        return selectionBudgetNote(selection.selected + overLimit, budget);
+      }
       // A real breakdown with nothing in it is not an empty table — it is a run where ranking
-      // kept everything discovery found, which is a result worth stating in words.
-      return selection.rows.length === 0 ? SELECTION_STATE_COPY.nothingDropped : null;
+      // kept everything discovery found, which is a result worth stating in words. With a
+      // recorded budget beside it, the stronger version of that statement is available: not
+      // just that nothing was dropped, but that there was room to spare.
+      if (selection.rows.length === 0) {
+        return budget === null
+          ? SELECTION_STATE_COPY.nothingDropped
+          : `${SELECTION_STATE_COPY.nothingDropped} ${selectionBudgetSpareNote(budget)}`;
+      }
+      // Rules fired, but not the budget — the site is smaller than the budget and what dropped
+      // it was the rules themselves. Saying so keeps a reader from assuming the missing URLs
+      // are the ones that lost a ranking they never had to enter.
+      return budget !== null && overLimit === 0 ? selectionBudgetSpareNote(budget) : null;
   }
 }
 

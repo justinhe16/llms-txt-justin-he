@@ -505,6 +505,13 @@ class CrawlService:
         # the recorded value for a run that never got as far as selecting anything, exactly as
         # `urls_robots_disallowed: 0` is.
         dropped: dict[str, int] = {}
+        # PER-201's, and the one hoisted local here that is NOT a "0 until the run gets that
+        # far" default: the page budget is known before the run starts and cannot change
+        # underneath it, so every path — including a failure before `CrawlLimits` is ever built
+        # — records the real number rather than a placeholder. Read off `self._settings`
+        # directly, which is the same field `CrawlLimits.from_settings` reads below, so the
+        # budget this row records is always the one `select_urls` was actually given.
+        max_pages = self._settings.crawl_max_pages
         crawl_delay_ms = self._settings.crawl_politeness_delay_ms
         robots: RobotsRules = ALLOW_ALL
         # Set by the failure paths below when the attempt should be retried, and raised
@@ -668,6 +675,7 @@ class CrawlService:
                         urls_selected=urls_selected,
                         urls_robots_disallowed=urls_robots_disallowed,
                         dropped=dropped,
+                        max_pages=max_pages,
                         crawl_delay_ms=crawl_delay_ms,
                         pages_enriched=pages_enriched,
                         enrich_failures=enrich_failures,
@@ -839,6 +847,7 @@ class CrawlService:
                     urls_selected=urls_selected,
                     urls_robots_disallowed=urls_robots_disallowed,
                     dropped=dropped,
+                    max_pages=max_pages,
                     crawl_delay_ms=crawl_delay_ms,
                     pages_enriched=pages_enriched,
                     enrich_failures=enrich_failures,
@@ -898,6 +907,7 @@ class CrawlService:
                     urls_selected=urls_selected,
                     urls_robots_disallowed=urls_robots_disallowed,
                     dropped=dropped,
+                    max_pages=max_pages,
                     crawl_delay_ms=crawl_delay_ms,
                     pages_enriched=pages_enriched,
                     enrich_failures=enrich_failures,

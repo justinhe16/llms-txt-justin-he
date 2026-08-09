@@ -107,7 +107,8 @@ export const SELECTION_RULES: Record<SelectionRuleKey, { label: string; explanat
   },
   over_limit: {
     label: "Over the page limit",
-    explanation: "Ranked below the cut — the run's page budget was already full.",
+    explanation:
+      "The one row here that is not a judgement about the URL. These passed every rule above; the survivors are then scored, sorted, and the run's page budget takes the top of the list. Everything below the cut is dropped by position — there is no quality bar it failed.",
   },
 };
 
@@ -227,6 +228,35 @@ export function capHitCopy(capHit: string | null): string {
 }
 
 /**
+ * The Fetch stage's closing sentence, with the one case `capHitCopy` alone gets wrong.
+ *
+ * **`NO_CAP_HIT` is false on any run whose page budget was spent at selection, and on a site
+ * larger than the budget it is false every single time.** `cap_hit` answers "which cap stopped
+ * the fetch loop," and the page budget stops a run one stage earlier — `select_urls` truncates
+ * the frontier to `max_pages - 1` before `crawl_site` is handed it, so neither of the crawl
+ * loop's two `cap_hit: "pages"` sites can fire (`lib/crawls/run-provenance.ts`'s "The cap the
+ * Fetch stage cannot see" section walks both). Printing "no cap was hit — the run finished
+ * before any budget ran out" directly under a Selection table reading "-252 Over the page
+ * limit" is not a rough edge; it is the panel stating the opposite of what happened, on
+ * exactly the runs a reader opened it to understand.
+ *
+ * `overLimit > 0` is the substitute signal, and it is a sound one in both directions: the rule
+ * fires if and only if ranking had more candidates than budget. `null` (a row with no per-rule
+ * split) falls through to `capHitCopy` unchanged rather than guessing — a version-9-or-earlier
+ * row genuinely does not record which rule dropped what.
+ *
+ * Still bound by ARCHITECTURE.md §3.4: the budget being spent is a SUCCESS. "Reached", never
+ * "cut off", "stopped short" or "hit its limit" — and the sentence leads with the pages that
+ * were fetched rather than the ones that were not.
+ */
+export function fetchCapNote(capHit: string | null, overLimit: number | null): string {
+  if (capHit === null && overLimit !== null && overLimit > 0) {
+    return `Every page this run selected was fetched. Its page budget was reached at selection rather than here — ${overLimit.toLocaleString()} ranked ${overLimit === 1 ? "URL" : "URLs"} did not fit into the frontier, so the fetch loop never had a cap left to reach.`;
+  }
+  return capHitCopy(capHit);
+}
+
+/**
  * The Selection stage's four non-`breakdown` sentences, in one place rather than inlined in
  * the renderer's `switch` — the same reason every other string in this module is here.
  *
@@ -251,6 +281,51 @@ export const SELECTION_STATE_COPY = {
     "Nothing to select — discovery found no candidate URLs, so the seed page was the whole crawl.",
   nothingDropped: "No rule dropped anything — every URL discovery found was selected.",
 } as const;
+
+/**
+ * The Selection stage's budget sentence — the panel's answer to "why did ranking drop those,
+ * and could more have got through?"
+ *
+ * Written as a function rather than a constant because both halves of the answer are numbers:
+ * how many candidates were actually ranked, and how many of them the budget had room for.
+ *
+ * **Two readings this replaces.** "99 selected, 252 dropped" invites the first — that the 252
+ * failed something — and `over_limit`'s own row copy above answers that one. The second is
+ * subtler and is what this sentence exists for: that selecting more was *possible*. It was
+ * not, and not by a policy that could go either way — `select_urls` is called with
+ * `limit = max_pages - 1` (`CrawlService.execute_run`), so `frontierLimit` is not a number
+ * ranking aimed at but the number it could not exceed. A reader who has just seen 252 URLs
+ * dropped is entitled to know whether a better-ranked site would have got 150 through. It
+ * would not.
+ *
+ * @param eligible How many candidates reached the budget check — `selected + overLimit`. Every
+ *   one of them passed all eleven preceding rules; that is what makes "passed every rule"
+ *   below a true statement about exactly this set rather than about the discovered total.
+ * @param budget This run's `PageBudget` (`lib/crawls/run-provenance.ts`).
+ */
+export function selectionBudgetNote(
+  eligible: number,
+  budget: { maxPages: number; frontierLimit: number }
+): string {
+  return (
+    `${eligible.toLocaleString()} URLs passed every rule above and were ranked. ` +
+    `The budget takes the top ${budget.frontierLimit.toLocaleString()}, so the rest were dropped on position alone. ` +
+    `No run selects more: the budget is ${budget.maxPages.toLocaleString()} pages and the seed is one of them.`
+  );
+}
+
+/**
+ * The Selection stage's sentence when the budget did NOT bind — every ranked candidate fit.
+ *
+ * The counterpart to `selectionBudgetNote`, and worth stating rather than leaving the stage
+ * silent: it tells a reader that the numbers above are the whole site, not the top of it, which
+ * is the single most useful thing this stage can say about a run where ranking never had to
+ * choose. Only reachable with a recorded budget — the derivation `PageBudget` falls back to on
+ * an old row is available exactly when the budget DID bind.
+ */
+export function selectionBudgetSpareNote(budget: { maxPages: number }): string {
+  return `Every ranked URL fit — the budget is ${budget.maxPages.toLocaleString()} pages and the site did not fill it, so nothing was dropped for want of room.`;
+}
 
 /**
  * The unit that follows each stage's headline number — "2 URLs found", "1 page listed".
@@ -303,6 +378,19 @@ export const PROVENANCE_SEGMENTS = {
 /** The Fetch stage's byte total, labelled — the one number in this panel that is not a count of
  * URLs or pages, which is why it sits beside the funnel bar rather than in it. */
 export const PROVENANCE_BYTES_LABEL = "Downloaded";
+
+/** The Selection stage's page budget, labelled — deliberately the same
+ * `label + value` shape as `PROVENANCE_BYTES_LABEL` above, and rendered in the same slot, so
+ * the two stages that have a configured number behind them present it identically. "Page
+ * budget", not "Page limit": the value is what the run was ALLOWED, and every other number in
+ * this panel is what it did. */
+export const PROVENANCE_BUDGET_LABEL = "Page budget";
+
+/** The page budget's own unit, for the `PROVENANCE_BUDGET_LABEL` value — "100 pages", matching
+ * the Fetch stage's noun rather than Selection's own "URLs", because the budget counts what is
+ * FETCHED (the seed included) and not what is selected. The note underneath is what reconciles
+ * the two. */
+export const PROVENANCE_BUDGET_UNIT = { one: "page", other: "pages" } as const;
 
 /** The `<summary>` line's right-hand micro-summary, so a reader gets the shape of the run
  * without opening the panel. Rendered as "2 found · 3 fetched · 1 listed", omitting any part
