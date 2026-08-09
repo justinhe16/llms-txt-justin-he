@@ -41,6 +41,61 @@ from app.features.runs.internals.stats_window import resolve_window
 _NOW = datetime.now(UTC)
 
 
+# -----------------------------------------------------------------------------------------
+# PER-199: a frozen clock for the two tests below that assert on `window.start`/`window.end`
+# THEMSELVES, rather than merely somewhere comfortably inside the window.
+#
+# Every other test in this file that calls `resolve_window("14d", _NOW)` only uses the result
+# to find a bucket well inside the window (`window.start + timedelta(days=3 or 5)`), and stays
+# correct even if the server's own `datetime.now(UTC)` call (`RunService.get_website_stats`,
+# `service.py:1016`) resolves a window shifted by the one day a single UTC-midnight crossing
+# between module-import time and request time can produce — the shifted bucket is still
+# inside the new window either way. The two tests below instead seed AT `window.start` and
+# `window.end` exactly, which is exactly what a one-day shift moves out from under them: one
+# of three seeded days stops being counted (`assert 2 == 3`), or a run seeded exactly at
+# `window.start` lands one bucket outside the server's own, differently-shifted window
+# (`assert 0 == 1`). That was reproduced and reverted while fixing this — see the PR
+# description for the reproduction.
+#
+# `frozen_stats_clock` removes the race rather than narrowing it: it monkeypatches
+# `app.features.runs.service.datetime` (that module does `from datetime import UTC, datetime,
+# timedelta`, so `app.features.runs.service.datetime` is the correct dotted path — the same
+# idiom `test_run_persistence.py` uses for `app.features.runs.service.transaction`) with a
+# subclass whose `.now(tz)` always returns one fixed instant, and hands that SAME instant back
+# so a test can resolve its own expected window from it. The frozen instant is deliberately a
+# few seconds after UTC midnight — the exact boundary this bug crossed — so these two tests
+# exercise it on every single run, not just the one run in twenty that used to catch it live.
+# -----------------------------------------------------------------------------------------
+
+
+def _frozen_datetime(frozen: datetime) -> type[datetime]:
+    """Build a `datetime` subclass whose `.now(tz)` always returns `frozen`.
+
+    A fresh class per call, never a module-level singleton, so two tests freezing two
+    different instants in the same session can never share — or clobber — one class
+    attribute.
+    """
+
+    class _Frozen(datetime):
+        @classmethod
+        def now(cls, tz: Any = None) -> datetime:
+            return frozen.astimezone(tz) if tz is not None else frozen
+
+    return _Frozen
+
+
+@pytest.fixture
+def frozen_stats_clock(monkeypatch: pytest.MonkeyPatch) -> datetime:
+    """Freeze the instant `RunService.get_website_stats` resolves its `?window=` against, and
+    return that same instant so a test can resolve an identical window itself — see the
+    section docstring above for the race this closes and why the instant is chosen where it
+    is.
+    """
+    frozen = datetime(2026, 3, 15, 0, 0, 7, tzinfo=UTC)
+    monkeypatch.setattr("app.features.runs.service.datetime", _frozen_datetime(frozen))
+    return frozen
+
+
 def _series_bucket(series: list[dict[str, Any]], t: datetime) -> dict[str, Any]:
     """Find the one `series` entry whose bucket start is exactly `t`.
 
@@ -51,6 +106,27 @@ def _series_bucket(series: list[dict[str, Any]], t: datetime) -> dict[str, Any]:
     matches = [point for point in series if parse(point["t"]) == t]
     assert len(matches) == 1, (t, [point["t"] for point in series])
     return matches[0]
+
+
+def _assert_active_buckets_are_exactly(
+    series: list[dict[str, Any]], expected: set[datetime]
+) -> None:
+    """Assert the buckets with `runs > 0` are exactly `expected`.
+
+    Names which bucket timestamps are missing or unexpected on failure (PER-199), rather than
+    two bare integers like `assert 2 == 3` — a mismatch here almost always means a window
+    boundary moved between when the test seeded its rows and when the request resolved its
+    own window, and naming the timestamps is what makes that readable straight from the
+    assertion rather than from a debugger session.
+    """
+    actual = {parse(point["t"]) for point in series if point["runs"] > 0}
+    missing = sorted(expected - actual)
+    unexpected = sorted(actual - expected)
+    assert not missing and not unexpected, (
+        f"active buckets do not match -- missing {missing}, unexpected {unexpected} "
+        f"(expected {sorted(expected)}, got {sorted(actual)}); a window boundary likely "
+        "moved between seeding and the request"
+    )
 
 
 def _compared_diff(
@@ -190,10 +266,13 @@ async def test_seeded_runs_produce_hand_verifiable_aggregates(
 
 
 async def test_a_14_day_window_with_runs_on_three_days_zero_fills_the_rest(
-    user_client: AsyncClient, websites_db: Pool
+    user_client: AsyncClient, websites_db: Pool, frozen_stats_clock: datetime
 ) -> None:
+    """PER-199: uses `frozen_stats_clock` rather than the module-level `_NOW`, because this
+    test seeds AT `window.start`/`window.end` themselves — see that fixture's section
+    docstring for the flake this closes."""
     website_id = await seed_website(websites_db, TEST_USER_A_ID, "https://stats-sparse.example")
-    window = resolve_window("14d", _NOW)
+    window = resolve_window("14d", frozen_stats_clock)
     active_days = [window.start, window.start + timedelta(days=5), window.end - window.step]
 
     for day in active_days:
@@ -205,17 +284,14 @@ async def test_a_14_day_window_with_runs_on_three_days_zero_fills_the_rest(
     series = response.json()["series"]
     assert len(series) == 14
 
-    nonzero = [point for point in series if point["runs"] > 0]
-    zero = [point for point in series if point["runs"] == 0]
-    assert len(nonzero) == 3
-    assert len(zero) == 11
-    assert {parse(point["t"]) for point in nonzero} == set(active_days)
+    _assert_active_buckets_are_exactly(series, set(active_days))
 
-    for point in zero:
-        assert point["completed"] == 0
-        assert point["failed"] == 0
-        assert point["avg_pages"] == 0
-        assert point["avg_duration_ms"] == 0
+    for point in series:
+        if point["runs"] == 0:
+            assert point["completed"] == 0
+            assert point["failed"] == 0
+            assert point["avg_pages"] == 0
+            assert point["avg_duration_ms"] == 0
 
 
 # -----------------------------------------------------------------------------------------
@@ -456,10 +532,13 @@ async def test_unknown_website_is_404(user_client: AsyncClient) -> None:
 
 
 async def test_a_run_exactly_at_window_start_is_counted_one_microsecond_earlier_is_not(
-    user_client: AsyncClient, websites_db: Pool
+    user_client: AsyncClient, websites_db: Pool, frozen_stats_clock: datetime
 ) -> None:
+    """PER-199: uses `frozen_stats_clock` rather than the module-level `_NOW`, because this
+    test seeds AT `window.start` itself — see that fixture's section docstring for the flake
+    this closes."""
     website_id = await seed_website(websites_db, TEST_USER_A_ID, "https://stats-boundary.example")
-    window = resolve_window("14d", _NOW)
+    window = resolve_window("14d", frozen_stats_clock)
 
     await seed_run(websites_db, website_id, started_at=window.start)
     await seed_run(websites_db, website_id, started_at=window.start - timedelta(microseconds=1))
@@ -473,7 +552,11 @@ async def test_a_run_exactly_at_window_start_is_counted_one_microsecond_earlier_
     assert body["totals"]["total_runs"] == 1
 
     first_bucket = _series_bucket(body["series"], window.start)
-    assert first_bucket["runs"] == 1
+    assert first_bucket["runs"] == 1, (
+        f"expected the run seeded exactly at window.start ({window.start.isoformat()}) to be "
+        f"counted in that bucket, got {first_bucket['runs']} -- a window boundary likely "
+        "moved between seeding and the request"
+    )
 
     # Nothing is double-counted at the edge: the series and the totals must agree exactly.
     assert sum(point["runs"] for point in body["series"]) == body["totals"]["total_runs"]
