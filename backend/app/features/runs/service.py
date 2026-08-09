@@ -1272,6 +1272,16 @@ class RunService:
         arq's own random id adds one duplicate job, which `claim_pending` absorbs — every
         sweep after that dedupes against this id.
 
+        **The dedupe below is safe for genuinely concurrent callers, not merely sequential
+        ones (PER-198).** arq 0.28.0's `ArqRedis.enqueue_job` (`arq/connections.py`) checks and
+        sets under a Redis `WATCH job_key` / `pipeline(transaction=True)` block, returning
+        `None` — never raising — the instant the job key already exists OR a `WatchError`
+        fires because a second caller enqueued it first. That makes two reaper passes racing
+        each other over the same orphan safe even when their `lock_reapable` reads genuinely
+        overlap, which is exactly what `tests/test_run_reaper.py`'s
+        `test_two_simultaneous_enqueues_of_the_same_job_id_produce_exactly_one_job` drives
+        directly against a real Redis.
+
         Broad `except Exception`, not `except RedisError`, for the reason
         `ScheduleService._enqueue` gives for its own loop. A failure here is counted and the
         loop continues; unlike the tick's enqueue path, it does NOT mark the run failed. The

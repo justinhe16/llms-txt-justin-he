@@ -20,36 +20,100 @@ enqueued", "what does THIS row say now" — because a leftover `pending` row in 
 database is common, harmless (the reaper only reads those), and would otherwise turn every
 `examined == 0` in this file into a coin flip.
 
-**Mutation testing, recorded because the results are not what you would guess.** Both locking
-tests below were run against a `_LOCK_REAPABLE` with `SKIP LOCKED` deleted:
+**PER-198 — why `test_two_concurrent_reapers_enqueue_each_orphan_exactly_once` was flaky, and
+what actually fixed it.** Before PER-198, that test `gather()`d two real passes, warmed the
+pool, and trusted the event loop to interleave them — nothing forced the two `lock_reapable`
+calls themselves to overlap. Confirmed, not assumed:
 
-* `test_two_concurrent_reapers_enqueue_each_orphan_exactly_once` goes RED, and it goes red for
-  both mutations — deleting `SKIP LOCKED` alone and deleting `FOR UPDATE SKIP LOCKED`
-  outright. It is centred on the ORPHAN sweep deliberately: orphan rows are re-enqueued with
-  no write, so a second reaper that reads them again has nothing to be stopped by. The
-  `processing` rows in the same batch cannot detect the mutation, because
-  `runs_writer.py`'s guarded UPDATEs already make a double-act a no-op — which is a real
-  defence, just not this one.
-* `test_skip_locked_lets_the_reaper_past_a_row_someone_else_is_holding` goes RED by TIMING
-  OUT, and only for the `SKIP LOCKED` mutation. It is the one that proves the property the
-  reaper actually needs in production: it scans a table that crawl workers are constantly
-  locking rows in, and it must never queue behind one of them.
+* **Measured overlap.** 50 isolated runs, instrumented at the `transaction()` boundary with
+  `pg_backend_pid()` and `clock_timestamp()` (`clock_timestamp()` specifically — inside a
+  transaction `now()` returns the transaction's start time, which would make every reading
+  look like proof of whatever was expected). Two distinct backend pids and positive overlap
+  (roughly 7-14ms) on every green iteration — and, in that same 50-run batch, one iteration
+  measured a genuinely positive 6.8ms transaction-level overlap and STILL produced the flaky
+  `assert 2 == 1`. That is the actual finding: transaction-lifetime overlap (`BEGIN` to
+  `COMMIT`) does not guarantee the two `lock_reapable` SELECTs themselves overlap — Python's
+  cooperative scheduling can let reaper 1 run its five guarded UPDATEs and commit inside the
+  gap between reaper 2's `BEGIN` and its `SELECT`, even while both connections are, by a
+  wall-clock measurement, "in a transaction" at the same instant.
+* **Forced reproduction.** Serializing the two passes completely — reaper 2 not permitted to
+  start until reaper 1's `transaction()` block had exited — with `FOR UPDATE SKIP LOCKED` left
+  completely intact, reproduced the exact reported failure byte-for-byte on the first attempt:
+  `AssertionError: two reapers both enqueued this orphan — FOR UPDATE SKIP LOCKED is not
+  holding` / `assert 2 == 1`, with the lock working perfectly. The count was never wrong
+  because of the lock; it was wrong because the two passes had not overlapped, and the second
+  pass legitimately re-read orphan rows the first had already committed.
+
+The fix, `_LockRendezvous` below, does not add a retry, a `sleep`, or a `flaky` marker — the
+ticket ruled out all three, because each would hide a genuine `SKIP LOCKED` regression as
+effectively as it hides the flake. It removes the race from the TEST HARNESS instead: reaper 2
+cannot return from its own `lock_reapable` until reaper 1's has already returned (locks held,
+transaction open, nothing committed), and reaper 1 is held inside that open transaction until
+reaper 2's `lock_reapable` has also returned. The two locking attempts therefore provably
+overlap on every run, not merely most of them — and the old assertion's message is no longer
+allowed to fire without that overlap being proven first by the rendezvous assertions ahead of
+it, which is what keeps a red run honest about what it actually means (see (5) in the mutation
+list below).
+
+**Whether the double-enqueue this test defends against is dangerous in production: no — it is
+benign, and this is confirmed rather than assumed.** `RunService._enqueue_reaped` passes a
+DETERMINISTIC job id (`crawl_job_id(run_id, attempts)`), and arq 0.28.0's own
+`ArqRedis.enqueue_job` (`arq/connections.py`) enqueues inside a `WATCH job_key` /
+`pipeline(transaction=True)` block and returns `None` — never raises — the instant either the
+job key already exists or a `WatchError` fires because another caller enqueued it first under
+the same key. That guarantee is Redis-atomic, not merely sequential: it holds for genuinely
+concurrent callers, which is exactly what
+`test_two_simultaneous_enqueues_of_the_same_job_id_produce_exactly_one_job` (below) drives
+directly. See `RunService._enqueue_reaped`'s own docstring (`app/features/runs/service.py`)
+for the same citation next to the code it documents.
+
+**Mutation testing, recorded because the results are not what you would guess — and because
+one of them corrects an earlier version of this docstring.** Both locking tests below were run
+against `_LOCK_REAPABLE` with `SKIP LOCKED` deleted (mutation A) and with `FOR UPDATE SKIP
+LOCKED` deleted outright (mutation B), each time reverted before the next:
+
+1. `test_two_concurrent_reapers_enqueue_each_orphan_exactly_once` goes RED under BOTH — under
+   A, at `_LockRendezvous`'s overlap-timeout assertion (reaper 2's `SELECT` blocks behind
+   reaper 1's row locks and the 5s budget expires); under B, at the lock-disjointness assertion
+   (reaper 2 locks rows reaper 1 is already holding, because nothing skips them any more). It
+   is centred on the ORPHAN sweep deliberately: orphan rows are re-enqueued with no write, so a
+   second reaper that reads them again has nothing to be stopped by. The `processing` rows in
+   the same batch cannot detect either mutation, because `runs_writer.py`'s guarded UPDATEs
+   already make a double-act a no-op — a real defence, just not this one.
+2. `test_skip_locked_lets_the_reaper_past_a_row_someone_else_is_holding` ALSO goes RED under
+   BOTH mutations, by TIMING OUT — **correcting this docstring's earlier claim that it failed
+   only for the `SKIP LOCKED`-only mutation.** Measured directly for PER-198: deleting `FOR
+   UPDATE SKIP LOCKED` outright leaves a bare `SELECT ... LIMIT $3` with no row lock at all, so
+   `lock_reapable` itself no longer blocks on the held row — but the reader still returns it,
+   and `RunsWriter.return_processing_to_pending` then issues its own guarded `UPDATE` against
+   that row, which DOES take a write lock, and blocks on the holder exactly as it would under
+   mutation A. The `asyncio.wait_for(..., timeout=5)` around the whole pass times out either
+   way. It remains the one test that proves the production property `lock_reapable` actually
+   needs — the reaper scans a table crawl workers are constantly locking rows in — even though
+   it can no longer distinguish "the SELECT's own SKIP LOCKED is missing" from "the SELECT
+   never took a row lock at all."
 
 The queue is a `_RecordingQueuePool` in almost every test, mirroring `tests/
 test_schedule_tick.py`'s stand-in: it records `(function, args, job_id)` without a network
-round trip. The real `queue_pool` is used for exactly one test — the deterministic-job-id
-dedupe — because arq's own refusal to enqueue a duplicate id is the behaviour under test
-there, and a stand-in cannot answer that question about arq.
+round trip. The real `queue_pool` is used for exactly THREE tests, each because a stand-in
+cannot answer the question it is asking: `test_the_second_pass_over_the_same_orphan_does_not_
+queue_a_second_job` (arq's own refusal to enqueue a duplicate id, sequentially),
+`test_two_passes_that_never_overlap_still_enqueue_each_orphan_once` (the same refusal, forced
+fully serialized rather than merely sequential — PER-198's dedupe-not-locking proof), and
+`test_two_simultaneous_enqueues_of_the_same_job_id_produce_exactly_one_job` (arq's own
+`WatchError` branch, reached only under a genuine concurrent `gather()`).
 """
 
 import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from arq.connections import ArqRedis
-from asyncpg import Pool
+from asyncpg import Connection, Pool
 from conftest import (
     TEST_QUEUE_NAME,
     TEST_USER_A_ID,
@@ -67,6 +131,7 @@ from app.features.runs.service import (
     build_run_service,
     crawl_job_id,
 )
+from app.infrastructure.db.transaction import transaction
 from app.worker import jobs, policy
 from app.worker.policy import MAX_ATTEMPTS
 from app.worker.settings import WorkerSettings
@@ -111,6 +176,130 @@ class _FailingQueuePool:
 
     async def enqueue_job(self, function: str, *args: Any, **kwargs: Any) -> object:
         raise ConnectionError("simulated Redis outage")
+
+
+# How long `_LockRendezvous` (below) will wait for the loser to catch up before giving up and
+# letting the winner proceed. Paid ONLY when the handoff fails — every green run resolves in
+# a handful of milliseconds, the time for reaper 2 to acquire an already-warm connection, BEGIN,
+# and run one SELECT. 5s is roughly three orders of magnitude of headroom over that, which is
+# what makes a timeout here a strong signal rather than a "maybe the CI box was busy" shrug.
+_OVERLAP_TIMEOUT_SECONDS = 5.0
+
+
+class _LockRendezvous:
+    """Makes the two reapers' `lock_reapable` calls DETERMINISTICALLY overlap, instead of
+    merely hoping they do.
+
+    **Why hoping is not enough — this is PER-198's whole finding.** The obvious version of
+    `test_two_concurrent_reapers_enqueue_each_orphan_exactly_once` just `gather()`s two real
+    passes and trusts the event loop to interleave them. Usually it does. Under load — a busy
+    CI box, or this suite running back-to-back with everything else in it — the two coroutines
+    can instead run one after the other: reaper 1's `SELECT ... FOR UPDATE SKIP LOCKED` locks
+    every row, does its writes, and COMMITS, all before reaper 2's `lock_reapable` ever runs.
+    Reaper 2 then legitimately re-reads the same now-committed, still-old `pending` rows and
+    enqueues them again — `SKIP LOCKED` never even had a locked row to skip, because there was
+    no overlap for it to defend. `enqueued.count(...) == 2` fires, and the assertion's own
+    message blames `FOR UPDATE SKIP LOCKED` for a failure the lock had nothing to do with.
+    Confirmed, not assumed, before this fix was written — see the module docstring's "root
+    cause" section for the measured overlap and the forced-serialization reproduction.
+
+    **The mechanism.** Patches the `RunsReader.lock_reapable` CLASS attribute (same shape as
+    the `RunsWriter.mark_processing_failed` patch in
+    `test_the_reaper_rescues_a_run_whose_own_failure_write_could_not_land` above), wrapping the
+    ORIGINAL method captured before the patch — `reap_stuck_runs` constructs a fresh
+    `RunsReader(tx)` per pass, so patching the class is what reaches both instances. The
+    guarded-`Pool` check inside the real `lock_reapable` still runs, because the wrapper calls
+    straight through to it.
+
+    A call counter, incremented before the `await`, tells call #1 (the winner, locks taken,
+    transaction open, nothing committed yet) apart from call #2 (the loser, whose own
+    `lock_reapable` cannot even return until call #1 has set `first_locked`). Call #1 then
+    BLOCKS on `second_locked` before it returns — so reaper 1's transaction is GUARANTEED still
+    open (it has not even left the `async with transaction(...)` block) at the exact moment
+    reaper 2's locked `SELECT` completes. That is a stronger guarantee than "the two coroutines
+    were scheduled close together": it is "reaper 2's lock attempt provably ran while reaper
+    1's locks were provably still held."
+
+    **The timeout must NOT raise.** Under a real `SKIP LOCKED` regression, reaper 2's `SELECT`
+    blocks on reaper 1's row locks while reaper 1 is blocked waiting on `second_locked` — a
+    genuine cycle, since neither call can proceed. Call #1 records `timed_out = True` and
+    returns normally instead of raising, which lets reaper 1 commit (releasing the locks reaper
+    2's blocked `SELECT` is waiting on) rather than leaving both coroutines deadlocked until
+    pytest's own runner kills the process.
+    """
+
+    def __init__(self) -> None:
+        self.first_locked = asyncio.Event()
+        self.second_locked = asyncio.Event()
+        self.calls = 0
+        # Which run ids each call locked, keyed by call number (1 or 2) — what lets the test
+        # assert the two calls' locked rows are disjoint, independent of the enqueue-count
+        # assertion below it.
+        self.locked_ids: dict[int, set[str]] = {}
+        self.timed_out = False
+
+    def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        original = RunsReader.lock_reapable
+
+        async def _gated(
+            reader: RunsReader,
+            *,
+            stuck_before: datetime,
+            orphaned_before: datetime,
+            limit: int,
+        ) -> list[dict[str, Any]]:
+            self.calls += 1
+            which = self.calls
+            rows = await original(
+                reader, stuck_before=stuck_before, orphaned_before=orphaned_before, limit=limit
+            )
+            self.locked_ids[which] = {str(row["id"]) for row in rows}
+            if which == 1:
+                self.first_locked.set()
+                try:
+                    await asyncio.wait_for(
+                        self.second_locked.wait(), timeout=_OVERLAP_TIMEOUT_SECONDS
+                    )
+                except TimeoutError:
+                    self.timed_out = True
+            else:
+                self.second_locked.set()
+            return rows
+
+        monkeypatch.setattr(RunsReader, "lock_reapable", _gated)
+
+
+class _CommitGate:
+    """Forces the SERIALIZED case on purpose — the exact condition that made the un-fixed test
+    flaky (see `_LockRendezvous` above) — by blocking a second caller until a first caller's
+    `transaction()` block has committed.
+
+    Patches `app.features.runs.service.transaction` itself (string-target `monkeypatch.setattr`,
+    the same indirection `test_the_reaper_rescues_a_run_whose_own_failure_write_could_not_land`
+    above uses for `RunsWriter.mark_processing_failed`), delegating to the real `transaction`
+    so every statement inside still runs for real — only the moment its caller learns the block
+    has exited is instrumented. Used by
+    `test_two_passes_that_never_overlap_still_enqueue_each_orphan_once`, which needs the
+    opposite of `_LockRendezvous`: proof that two passes with NO overlap at all still produce
+    exactly one job per orphan, because arq's own dedupe — not `FOR UPDATE SKIP LOCKED` — is
+    what makes that true.
+    """
+
+    def __init__(self) -> None:
+        self.first_committed = asyncio.Event()
+        self._calls = 0
+
+    def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        @asynccontextmanager
+        async def _gated(pool: Pool) -> AsyncIterator[Connection]:
+            self._calls += 1
+            which = self._calls
+            async with transaction(pool) as conn:
+                yield conn
+            if which == 1:
+                self.first_committed.set()
+
+        monkeypatch.setattr("app.features.runs.service.transaction", _gated)
 
 
 @pytest.fixture
@@ -470,6 +659,86 @@ async def test_the_second_pass_over_the_same_orphan_does_not_queue_a_second_job(
         await queue_pool.flushdb()
 
 
+async def test_two_passes_that_never_overlap_still_enqueue_each_orphan_once(
+    websites_db: Pool,
+    run_service: RunService,
+    queue_pool: ArqRedis,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Forces the SERIALIZED case — no overlap between the two passes at all, the exact
+    condition that made `test_two_concurrent_reapers_enqueue_each_orphan_exactly_once` flaky
+    before PER-198 (see this module's docstring) — and proves that against REAL Redis the
+    outcome is still exactly one job per orphan.
+
+    **Deliberately lock-independent — this is not redundant `SKIP LOCKED` coverage.** With
+    zero overlap there is nothing for `FOR UPDATE SKIP LOCKED` to defend: reaper 1 commits
+    fully, via `_CommitGate`, before reaper 2's `lock_reapable` even runs, so reaper 2
+    legitimately re-reads the same, still-old `pending` rows — the identical situation the
+    flaky version of the headline test stumbled into by accident. What stops reaper 2 from
+    enqueuing a second job for each row is arq's own refusal to enqueue a job under an id that
+    already exists (`RunService._enqueue_reaped`'s `_job_id=crawl_job_id(run_id, attempts)`),
+    not the database lock — this test passes identically whether `_LOCK_REAPABLE` has `FOR
+    UPDATE SKIP LOCKED`, `FOR UPDATE`, or nothing at all. It pins "dedupe, not `SKIP LOCKED`,
+    is what makes a concurrent — or merely un-overlapped — orphan sweep safe against Redis,"
+    which `test_two_concurrent_reapers_enqueue_each_orphan_exactly_once` does not test.
+    """
+    await _assert_no_foreign_stuck_runs(websites_db)
+    await queue_pool.flushdb()
+    try:
+        orphan_ids = [
+            (await _seed_orphan(websites_db, f"serialized-orphan-{i}"))[1] for i in range(5)
+        ]
+
+        gate = _CommitGate()
+        gate.install(monkeypatch)
+
+        async def _second_after_commit() -> Any:
+            await gate.first_committed.wait()
+            return await _reap(run_service, queue_pool)
+
+        first, second = await asyncio.gather(_reap(run_service, queue_pool), _second_after_commit())
+
+        assert first.enqueued == 5
+        assert second.enqueued == 0
+        assert second.already_queued == 5
+        assert second.orphans_swept >= 5, "it DID re-read them; arq is what stopped it"
+        assert await queue_pool.zcard(TEST_QUEUE_NAME) == 5
+        for run_id in orphan_ids:
+            assert await queue_pool.zscore(TEST_QUEUE_NAME, crawl_job_id(run_id, 0)) is not None
+    finally:
+        await queue_pool.flushdb()
+
+
+async def test_two_simultaneous_enqueues_of_the_same_job_id_produce_exactly_one_job(
+    queue_pool: ArqRedis,
+) -> None:
+    """Reaches arq's own `WatchError` dedupe branch directly — the test above forces its two
+    passes fully SERIAL and cannot get here on purpose. `gather()` of two `enqueue_job` calls
+    under the SAME deterministic id, built from the reaper's own `CRAWL_TASK_JOB_NAME` /
+    `crawl_job_id` so this cannot drift from what `_enqueue_reaped` actually passes.
+    Deterministic under either interleaving: arq's `pipeline(transaction=True)` /
+    `WATCH`/`MULTI`/`EXEC` (see `RunService._enqueue_reaped`'s docstring) makes exactly one of
+    the two calls win, no matter which one Redis happens to service first. No `runs` row
+    involved — this is Redis-only, so it needs neither `websites_db` nor the foreign-row guard.
+    """
+    await queue_pool.flushdb()
+    try:
+        run_id = uuid4()
+        job_id = crawl_job_id(run_id, 0)
+
+        results = await asyncio.gather(
+            queue_pool.enqueue_job(CRAWL_TASK_JOB_NAME, str(run_id), _job_id=job_id),
+            queue_pool.enqueue_job(CRAWL_TASK_JOB_NAME, str(run_id), _job_id=job_id),
+        )
+
+        assert sum(result is not None for result in results) == 1, (
+            "exactly one of the two simultaneous enqueues should win under the same job id"
+        )
+        assert await queue_pool.zcard(TEST_QUEUE_NAME) == 1
+    finally:
+        await queue_pool.flushdb()
+
+
 # -----------------------------------------------------------------------------------------
 # 5. PER-163's gap — the case nothing else in the system can recover from.
 # -----------------------------------------------------------------------------------------
@@ -574,19 +843,26 @@ def test_the_batch_limit_is_not_unbounded() -> None:
 # -----------------------------------------------------------------------------------------
 
 
-# Enough rows that the winning reaper holds its transaction open across many round trips,
-# which is the window the loser has to actually overlap in. `tests/test_schedule_tick.py`
-# learned this the hard way: its single-row version of the same test passed with all locking
-# deleted, because the second coroutine was still opening a TCP connection while the first
-# committed.
+# No longer the overlap window — `_LockRendezvous` above makes overlap deterministic
+# regardless of batch size (PER-198). What a batch of 25 still buys: it makes the loser's
+# `SKIP LOCKED` skip observable across many rows rather than a coin-flip a single row would be,
+# and it gives `_LockRendezvous.locked_ids` two non-trivial sets to assert are disjoint.
+# `tests/test_schedule_tick.py` learned the ORIGINAL reason for a batch the hard way — its
+# single-row version of the analogous tick test passed with all locking deleted, because the
+# second coroutine was still opening a TCP connection while the first committed — but that
+# specific failure mode is exactly what the rendezvous below now rules out directly, rather
+# than by outrunning it with enough rows.
 _CONCURRENT_BATCH = 25
 
 
 async def test_two_concurrent_reapers_enqueue_each_orphan_exactly_once(
-    websites_db: Pool, run_service: RunService
+    websites_db: Pool, run_service: RunService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`FOR UPDATE SKIP LOCKED`, driven the way it will actually be exercised: two overlapping
-    passes against the real pool.
+    passes against the real pool — with the overlap made DETERMINISTIC by `_LockRendezvous`
+    rather than left to the event loop's mood (PER-198; see the module docstring's "root
+    cause" section for how the old, hope-based version of this test produced the exact
+    `assert 2 == 1` this one guards against, with `FOR UPDATE SKIP LOCKED` fully intact).
 
     **Centred on the ORPHAN sweep, and that is the whole design of the test.** The obvious
     version — seed stuck `processing` runs, gather two reapers, assert each was rescued once —
@@ -598,9 +874,11 @@ async def test_two_concurrent_reapers_enqueue_each_orphan_exactly_once(
     Orphans have no such guard, because sweeping one writes nothing at all: a second reaper
     that reads the same `pending` rows enqueues the same jobs again. So the observable
     property is "exactly one enqueue per orphan", and it goes red for BOTH mutations —
-    deleting `SKIP LOCKED` (the loser blocks, then re-reads rows that are still `pending` and
-    still old, and enqueues all of them again) and deleting `FOR UPDATE SKIP LOCKED` outright
-    (the loser never blocks and does the same thing sooner).
+    deleting `SKIP LOCKED` (the loser blocks, then — once `_LockRendezvous`'s timeout releases
+    the winner and it commits — re-reads rows that are still `pending` and still old, and
+    enqueues all of them again) and deleting `FOR UPDATE SKIP LOCKED` outright (the loser never
+    blocks and does the same thing sooner, provably overlapping the winner's open transaction).
+    See the module docstring's mutation-testing section for the actual, measured matrix.
 
     Stuck `processing` rows are seeded alongside anyway, and their final states asserted, so
     that the "no run is double-processed" claim covers both classes even though only one of
@@ -615,31 +893,101 @@ async def test_two_concurrent_reapers_enqueue_each_orphan_exactly_once(
         (await _seed_stuck(websites_db, f"concurrent-stuck-{i}", attempts=1))[1] for i in range(5)
     ]
 
-    # Warm the pool: without this, the second coroutine's first `await` is `pool.acquire()`
-    # opening a brand-new Postgres connection — several milliseconds of TCP and auth — while
-    # the first reaper runs its whole transaction and commits. The two would never overlap,
-    # and the test would pass with every lock removed. See tests/test_schedule_tick.py's
-    # headline test, which had to learn this.
+    # Warm the pool: the rendezvous below still has to fit reaper 2's connection acquisition,
+    # `BEGIN`, and one `SELECT` inside `_OVERLAP_TIMEOUT_SECONDS` after reaper 1's
+    # `lock_reapable` returns. Without this, `pool.acquire()` opening a brand-new Postgres
+    # connection — several milliseconds of TCP and auth — eats into that budget for no reason.
+    # It no longer decides WHETHER the two passes overlap (the rendezvous below guarantees
+    # that regardless), only how much of the timeout's headroom setup costs rather than margin.
     warm = await asyncio.gather(*(websites_db.acquire() for _ in range(4)))
     await asyncio.gather(*(websites_db.release(connection) for connection in warm))
 
     queues = [_RecordingQueuePool(), _RecordingQueuePool()]
-    await asyncio.gather(_reap(run_service, queues[0]), _reap(run_service, queues[1]))
 
+    rendezvous = _LockRendezvous()
+    rendezvous.install(monkeypatch)
+
+    async def _second_reaper() -> Any:
+        # Do not even start reaper 2 until reaper 1's `lock_reapable` has returned — reaper 1's
+        # transaction is open and its locks are taken at that point, but nothing is committed.
+        await asyncio.wait_for(rendezvous.first_locked.wait(), timeout=_OVERLAP_TIMEOUT_SECONDS)
+        return await _reap(run_service, queues[1])
+
+    await asyncio.gather(_reap(run_service, queues[0]), _second_reaper())
+
+    assert rendezvous.calls == 2, (
+        "lock_reapable was called a different number of times than this rendezvous assumes — "
+        "a refactor changed how many times one reaper pass calls it, and the rendezvous below "
+        "needs updating to match"
+    )
+    assert not rendezvous.timed_out, (
+        f"reaper 2 did not complete its lock_reapable within {_OVERLAP_TIMEOUT_SECONDS}s while "
+        "reaper 1 held its transaction open, so the two passes never overlapped and the count "
+        "assertion below would be meaningless either way. Two causes, in order of likelihood: "
+        "(1) SKIP LOCKED is missing from _LOCK_REAPABLE, so reaper 2 is BLOCKED on reaper 1's "
+        "row locks — a real regression, and the one "
+        "test_skip_locked_lets_the_reaper_past_a_row_someone_else_is_holding is built to name; "
+        "(2) the handoff in this test broke. Check _LOCK_REAPABLE first."
+    )
+    # Lock-level disjointness, robust to `REAP_BATCH_LIMIT`: reaper 1 takes its locks first and
+    # holds them for the rendezvous's whole duration, so reaper 2 cannot physically lock a row
+    # reaper 1 is holding — even if reaper 1 filled its batch and reaper 2 legitimately picked
+    # up the remainder, the two sets are still disjoint.
+    assert rendezvous.locked_ids[1].isdisjoint(rendezvous.locked_ids[2]), (
+        "reaper 2 locked one or more rows reaper 1 was already holding — "
+        "FOR UPDATE SKIP LOCKED is not holding"
+    )
+
+    # **Split by the DIRECTION of the failure — the message may only accuse `FOR UPDATE SKIP
+    # LOCKED` when the count is actually TOO HIGH.** A count of 0 means the orphan was
+    # enqueued by NOBODY, which the lock cannot explain — `SKIP LOCKED` stops a row from being
+    # taken twice, it has no opinion about a row nobody took. The likeliest cause of `0` is
+    # foreign `pending`/`processing` rows in TEST_DATABASE_URL (the reaper is unscoped by
+    # design — see the module docstring's global-state guard) pushing this pass's batch past
+    # `REAP_BATCH_LIMIT`, so this row was never even examined; a second, rarer cause is another
+    # process mutating or deleting rows mid-test. Neither implicates the lock, so accusing it
+    # here would be exactly the false-accusation risk this whole rewrite exists to remove —
+    # just aimed the opposite direction from the `count > 1` case.
     enqueued = queues[0].run_ids() + queues[1].run_ids()
     for run_id in orphan_ids:
-        assert enqueued.count(str(run_id)) == 1, (
-            "two reapers both enqueued this orphan — FOR UPDATE SKIP LOCKED is not holding"
+        count = enqueued.count(str(run_id))
+        assert count <= 1, (
+            f"orphan {run_id} was enqueued {count} times, not 1 — two reapers both enqueued "
+            "this orphan. The two passes provably overlapped — reaper 2's lock_reapable "
+            "completed while reaper 1 held its transaction open (see the rendezvous "
+            "assertions above) — so this is FOR UPDATE SKIP LOCKED not holding, not a "
+            "scheduling accident."
+        )
+        assert count == 1, (
+            f"orphan {run_id} was enqueued {count} times, not 1 — it was never enqueued by "
+            "either pass. This is NOT a locking failure: FOR UPDATE SKIP LOCKED only stops a "
+            "row from being taken twice, it cannot explain a row nobody took. Likeliest cause: "
+            f"foreign reapable rows in TEST_DATABASE_URL pushed this pass's batch past "
+            f"REAP_BATCH_LIMIT={REAP_BATCH_LIMIT} before it reached this row — check for a "
+            "foreign pytest process against the same database before suspecting the reaper."
         )
 
     # Final DATABASE state for the stuck half: each rescued exactly once, and none left
-    # `processing`. This cannot distinguish the mutations (see the docstring) but it is the
-    # claim the ticket makes, so it is asserted rather than assumed.
+    # `processing`. This cannot distinguish the mutations (see the module docstring) but it is
+    # the claim the ticket makes, so it is asserted rather than assumed. Same direction-split
+    # as the orphan loop above, and the same reason: a count of 0 here is exactly as likely to
+    # be a foreign-row batch overrun as a real bug, and the message must not conflate the two.
     for run_id in stuck_ids:
         row = await _row(websites_db, run_id)
         assert row["status"] == "pending"
         assert row["attempts"] == 1
-        assert enqueued.count(str(run_id)) == 1
+        stuck_count = enqueued.count(str(run_id))
+        assert stuck_count <= 1, (
+            f"stuck run {run_id} was enqueued {stuck_count} times, not 1 — double-enqueued. "
+            "The `processing` rows in this batch cannot distinguish either mutation on their "
+            "own (see the module docstring), but a count above 1 is still worth knowing about."
+        )
+        assert stuck_count == 1, (
+            f"stuck run {run_id} was enqueued {stuck_count} times, not 1 — never enqueued by "
+            f"either pass. As with the orphans above, check for foreign reapable rows pushing "
+            f"this batch past REAP_BATCH_LIMIT={REAP_BATCH_LIMIT} (or a foreign pytest process "
+            "against the same database) before suspecting the reaper itself."
+        )
 
 
 async def test_skip_locked_lets_the_reaper_past_a_row_someone_else_is_holding(
