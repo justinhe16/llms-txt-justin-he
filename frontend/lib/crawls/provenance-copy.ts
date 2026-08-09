@@ -226,6 +226,93 @@ export function capHitCopy(capHit: string | null): string {
   return CAP_HIT[capHit] ?? `Ended on a cap this panel has no name for yet: "${capHit}".`;
 }
 
+/**
+ * The Selection stage's four non-`breakdown` sentences, in one place rather than inlined in
+ * the renderer's `switch` — the same reason every other string in this module is here.
+ *
+ * `totalsOnly` is the one worth reading twice. A run whose `stats` carry no `dropped` key is
+ * NOT a run we know nothing about: `urls_discovered` and `urls_selected` are version-4 keys, so
+ * both ends of the funnel are still on the row and the total dropped is the difference between
+ * them (`lib/crawls/run-provenance.ts`'s `"totals_only"` state). What is missing is only which
+ * rules fired. Saying that precisely — rather than "the breakdown isn't available" — is the
+ * difference between a panel that reports a gap in the record and one that looks broken, and
+ * every run crawled before PER-196 deployed is in exactly this state.
+ *
+ * `unavailable` is what is left when even the totals are absent: a version-3-or-earlier row,
+ * from before discovery counts were recorded at all.
+ */
+export const SELECTION_STATE_COPY = {
+  unavailable:
+    "This run predates the selection counters, so nothing about how its frontier was chosen was recorded.",
+  totalsOnly:
+    "This run was crawled before the per-rule breakdown was recorded. The totals survived; which rules did the dropping did not.",
+  seedNotFetched: "Nothing to select — discovery found no candidate URLs.",
+  seedOnly:
+    "Nothing to select — discovery found no candidate URLs, so the seed page was the whole crawl.",
+  nothingDropped: "No rule dropped anything — every URL discovery found was selected.",
+} as const;
+
+/**
+ * The unit that follows each stage's headline number — "2 URLs found", "1 page listed".
+ *
+ * Both forms, because a run that lists one page is common enough that "1 pages listed" would
+ * be on screen daily. `stageUnit` below picks between them; nothing renders these directly.
+ *
+ * Lower-case and plural-by-default, because every one of them is read as the tail of a number
+ * and never as a label on its own. `fetch` counts PAGES rather than URLs on purpose: it is the
+ * first stage where the seed — never a member of `selected` (`lib/crawls/run-provenance.ts`'s
+ * own invariants section) — is part of the count, so a reader who notices the count going UP
+ * between Selection and Fetch has the noun change as the first hint of why, before they reach
+ * the segment labelled "Seed page" that says it outright.
+ */
+export const PROVENANCE_STAGE_UNITS = {
+  discovery: { one: "URL found", other: "URLs found" },
+  selection: { one: "URL selected", other: "URLs selected" },
+  fetch: { one: "page fetched", other: "pages fetched" },
+  index: { one: "page listed", other: "pages listed" },
+} as const;
+
+/** One stage's unit, agreeing with its headline count. An unrecorded count (`null`, rendered
+ * as an em dash) takes the plural — there is no number for it to agree with, and "— pages
+ * listed" reads as the general case the dash stands in for. */
+export function stageUnit(unit: { one: string; other: string }, count: number | null): string {
+  return count === 1 ? unit.one : unit.other;
+}
+
+/**
+ * The label on each segment of a stage's funnel bar, and in the legend under it.
+ *
+ * Two rules hold across all of them, both inherited from ARCHITECTURE.md §3.4's "hitting a cap
+ * is a success": nothing here is failure language for an outcome that is not a failure
+ * (`notAttempted` is "Not attempted", never "skipped" or "missed"), and every segment names a
+ * fact the row actually recorded rather than one derived from a subtraction the panel hopes is
+ * right.
+ */
+export const PROVENANCE_SEGMENTS = {
+  discovered: "Discovered",
+  selected: "Selected",
+  dropped: "Dropped",
+  seed: "Seed page",
+  frontier: "From the frontier",
+  failed: "Failed",
+  notAttempted: "Not attempted",
+  listed: "Listed in llms.txt",
+  omittedEmpty: "Omitted as empty",
+} as const;
+
+/** The Fetch stage's byte total, labelled — the one number in this panel that is not a count of
+ * URLs or pages, which is why it sits beside the funnel bar rather than in it. */
+export const PROVENANCE_BYTES_LABEL = "Downloaded";
+
+/** The `<summary>` line's right-hand micro-summary, so a reader gets the shape of the run
+ * without opening the panel. Rendered as "2 found · 3 fetched · 1 listed", omitting any part
+ * this run did not record. */
+export const PROVENANCE_PREVIEW = {
+  found: "found",
+  fetched: "fetched",
+  listed: "listed",
+} as const;
+
 /** The disclosure's own summary text, closed by default. */
 export const PROVENANCE_SUMMARY = "Show how this was built";
 

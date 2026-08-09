@@ -534,7 +534,25 @@ folding the new keys into 3 would have left two different shapes stamped with th
 built" — is its one reader
 (`frontend/components/crawls/crawl-provenance.tsx`), turning a run's discovery source, its
 selection funnel, its fetch counts, and its index counts into a plain-language explanation of
-how that run's seed URL became its `llms.txt`. Only rule KEYS travel from backend to frontend;
+how that run's seed URL became its `llms.txt`. It draws that as a funnel and not four stacked
+statistics: the four stages sit on one rail, each with a proportional bar drawn to a single
+shared scale, so the narrowing from "URLs discovery found" to "pages that reached `llms.txt`"
+is visible before any number is read. The one stage where the funnel WIDENS is Fetch, and the
+segment responsible is labelled — `pages_crawled` counts the seed, which is never a member of
+`urls_selected` (`internals/url_ranking.py` drops it under its own `"seed"` rule and
+`internals/crawler.py` fetches it separately), so `urls_selected >= pages_crawled` is the one
+inequality in this pipeline that does not hold, and a panel that hid the seed would render
+that as broken arithmetic.
+
+**A row written before version 9 degrades to its totals, not to nothing.** Absence of the
+`dropped` key means exactly one thing — this row predates version 9 — and `urls_discovered`,
+`urls_selected` (version 4) and `urls_robots_disallowed` (version 6) are all still on it, so
+the panel renders both ends of the funnel, `discovered - selected` as the total dropped, and
+the one rule version 6 recorded by name, saying only that the per-rule split was not recorded.
+That is the state every run crawled before PER-196 deployed is in, which at the moment it
+shipped was every run in the database; a panel that answered "the selection breakdown isn't
+available" to a question it could largely answer would have read as a bug in the panel rather
+than a gap in the record. Only rule KEYS travel from backend to frontend;
 the human label and the one-line explanation for each are frontend copy
 (`frontend/lib/crawls/provenance-copy.ts`), matched by hand to `/docs#selection` where that
 page glosses a rule and written directly from the rule's own predicate where it does not — the

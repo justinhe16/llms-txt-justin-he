@@ -148,12 +148,16 @@ function RunPicker({
   const selected = runs.find((run) => run.id === selectedRunId);
 
   return (
-    <div className="flex items-center gap-3">
-      <span className="text-sm text-muted-foreground">Showing</span>
+    <div className="flex min-w-0 items-center gap-3">
+      <span className="shrink-0 text-sm text-muted-foreground">Showing</span>
       <DropdownMenu>
+        {/* `shrink min-w-0` overrides the base button's `shrink-0`, and `h-auto` its fixed
+            height: together they let the trigger narrow to the space it actually has and wrap
+            its own contents onto a second line rather than running off the right edge of a
+            375px viewport. The trigger renders one run; the MENU is what needed widening. */}
         <DropdownMenuTrigger asChild>
-          <Button variant="outline" className="justify-between gap-2">
-            <span className="flex min-w-0 items-center gap-2">
+          <Button variant="outline" className="h-auto min-w-0 shrink justify-between gap-3 py-1.5">
+            <span className="flex min-w-0 flex-wrap items-center gap-2">
               {selected ? (
                 <>
                   <RelativeTime iso={selected.started_at} className="text-sm" />
@@ -168,13 +172,31 @@ function RunPicker({
           </Button>
         </DropdownMenuTrigger>
         {/* Capped and scrollable: the picker lists every run loaded into the Runs tab,
-            which grows with each "Load more" and would otherwise run off the screen. */}
-        <DropdownMenuContent className="max-h-80 w-72 overflow-y-auto">
+            which grows with each "Load more" and would otherwise run off the screen.
+
+            `w-auto` OVERRIDES the primitive's default `w-(--radix-dropdown-menu-trigger-width)`
+            (components/ui/dropdown-menu.tsx), and the `min-w-*` beside it is what keeps the
+            menu at least as wide as the button that opened it. Sizing a menu to its trigger is
+            the right default for a select-shaped control whose options are short; it is the
+            wrong one here, because a row is a timestamp, a status and possibly an enrichment
+            badge, and the trigger renders only ONE row's worth of that while the menu has to
+            fit the widest. Left at the default (and at the `w-72` this previously pinned it
+            to), "43m ago" wrapped onto two lines and the badge was clipped at the right edge.
+            `calc(... + 2.75rem)` is the padding the trigger does not pay for: each item
+            reserves `pr-8` for the radio checkmark, on top of the content's own `p-1`. The
+            `max-w-*` is the other side of that: `min-w` alone would happily push the menu past
+            the right edge of a 375px viewport. It is Radix's own measurement of the room left
+            between the trigger and that edge, not a `100vw` guess, so it already accounts for
+            where the menu was actually placed. */}
+        <DropdownMenuContent className="max-h-80 w-auto max-w-(--radix-dropdown-menu-content-available-width) min-w-[calc(var(--radix-dropdown-menu-trigger-width)+2.75rem)] overflow-y-auto">
           <DropdownMenuRadioGroup value={selectedRunId} onValueChange={onSelectRun}>
             {runs.map((run) => (
-              <DropdownMenuRadioItem key={run.id} value={run.id}>
-                <span className="flex min-w-0 items-center gap-2">
-                  <RelativeTime iso={run.started_at} className="text-sm" />
+              <DropdownMenuRadioItem key={run.id} value={run.id} className="gap-2 py-1.5">
+                {/* `whitespace-nowrap` on the row, and a floor under the timestamp: the two
+                    together are what make this list scannable, keeping every status dot in one
+                    column instead of wherever "43m ago" versus "1d ago" happens to end. */}
+                <span className="flex min-w-0 items-center gap-2 whitespace-nowrap">
+                  <RelativeTime iso={run.started_at} className="min-w-14 text-sm" />
                   <RunStatusIndicator status={rowStatusFromRunStatus(run.status)} />
                   <RunEnrichmentBadge run={run} />
                 </span>

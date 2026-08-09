@@ -1,7 +1,8 @@
 // The view model behind the Output tab's "Show how this was built" panel
 // (components/crawls/crawl-provenance.tsx) — one run's `stats` turned into the four stages
-// the ticket asks for (Discovery, Selection, Fetch, Index), plus the four states its own
-// numbers can be in (unavailable, seed-never-fetched, seed-only, a real breakdown).
+// the ticket asks for (Discovery, Selection, Fetch, Index), plus the five states its own
+// numbers can be in (unavailable, seed-never-fetched, seed-only, totals-only, a real
+// breakdown).
 //
 // Reads `run.stats` the same defensive `?.`/`typeof`/`Number.isFinite` way `run-display.ts`'s
 // `runPagesCrawled` does, for the identical reason: `stats` is jsonb whose shape belongs to
@@ -12,7 +13,7 @@
 // a shape this module builds, not one the backend returns.
 //
 // The rule labels and one-line explanations are NOT here. This module owns the numbers and
-// the four-state predicate; `lib/crawls/provenance-copy.ts` owns every string a human wrote —
+// the five-state predicate; `lib/crawls/provenance-copy.ts` owns every string a human wrote —
 // `SELECTION_RULE_ORDER`, `selectionRuleCopy`, `DISCOVERY_SOURCE`, `CAP_HIT` — the same split
 // `enrichment-copy.ts` vs `run-display.ts` already draws for the Runs and Output tabs'
 // enrichment badge (ARCHITECTURE.md §8.4).
@@ -30,14 +31,11 @@ export interface SelectionRow {
 }
 
 /**
- * The four states `runs.stats["dropped"]` can put the Selection stage in — see the ticket's
- * own States section, and the acceptance criterion this type exists to make impossible to get
- * wrong: never a zero standing in for "unknown," and never two stages of the same panel
- * disagreeing about what happened.
+ * The five states `runs.stats` can put the Selection stage in — see the ticket's own States
+ * section, and the acceptance criterion this type exists to make impossible to get wrong:
+ * never a zero standing in for "unknown," and never two stages of the same panel disagreeing
+ * about what happened.
  *
- * * `"unavailable"` — `stats.dropped` is not a plain object at all, which is exactly what a
- *   row written before `RUN_STATS_VERSION` 9 looks like (the key is simply absent). The panel
- *   says the selection breakdown isn't available for this run, and renders no numbers.
  * * `"seed_not_fetched"` — discovery found nothing (`urlsDiscovered === 0`) AND the seed
  *   itself never landed (`!seedFetched`, i.e. `pagesCrawled === 0` — `internals/crawler.py`'s
  *   own comment that an empty `pages` list is exactly equivalent to "the seed never landed").
@@ -55,11 +53,33 @@ export interface SelectionRow {
  *   later failed to fetch (sitemap discovery runs before the seed is fetched — see
  *   `service.py`'s `execute_run`) — that combination is not this type's problem to flag: it
  *   makes no "the seed was crawled" claim, so nothing here contradicts the Fetch stage.
+ * * `"totals_only"` — `stats.dropped` is not a plain object at all, which per
+ *   `RUN_STATS_VERSION`'s version-9 paragraph means exactly one thing and never any other:
+ *   **this row predates version 9.** The per-rule split is gone, but the two ends of the
+ *   funnel are not — `urls_discovered` and `urls_selected` have been recorded since version 4
+ *   and `urls_robots_disallowed` since version 6, so the total dropped is
+ *   `discovered - selected` and, on a version-6-or-later row, one named rule survives with it.
+ *   Degrading to that is the difference between "we did not record which rules fired" and
+ *   "we know nothing about selection," and only the first is true. This is the state every run
+ *   crawled before PER-196 deployed lands in — which, at the time it shipped, was every run in
+ *   the database.
+ * * `"unavailable"` — no breakdown AND no totals either: a row so old (or so truncated) that
+ *   `urls_discovered`/`urls_selected` are missing too. The only state that renders no numbers,
+ *   and the only one that should be genuinely rare.
  */
 export type SelectionState =
   | { kind: "unavailable" }
   | { kind: "seed_not_fetched" }
   | { kind: "seed_only" }
+  | {
+      kind: "totals_only";
+      discovered: number;
+      selected: number;
+      droppedTotal: number;
+      /** `stats.urls_robots_disallowed` — the one rule whose count survives on a version-6-to-8
+       * row, or `null` on a version-4/5 row that never recorded it. */
+      robotsDisallowed: number | null;
+    }
   | { kind: "breakdown"; rows: SelectionRow[]; droppedTotal: number; selected: number };
 
 /** What reached (or never reached) `llms.txt` — `"not_stored"` when this run never persisted
@@ -107,20 +127,38 @@ function selectionState(
   urlsSelected: number | null,
   seedFetched: boolean
 ): SelectionState {
-  const dropped = stats.dropped;
-  // Pre-version-9 rows simply have no `dropped` key; `typeof null === "object"` is why `null`
-  // is excluded explicitly rather than by `typeof` alone, and the array check guards against
-  // a value that is technically an object but not the `{rule: count}` map this key promises.
-  if (dropped === null || typeof dropped !== "object" || Array.isArray(dropped)) {
-    return { kind: "unavailable" };
-  }
-
+  // "Discovery found nothing" is checked FIRST, ahead of the breakdown, because it is the same
+  // story whether or not the per-rule map is there: a run with no candidates has no funnel to
+  // split up, and saying "the breakdown isn't available" about it would withhold an answer this
+  // module already has. Only a run that discovered something needs to know how the split was
+  // recorded.
   if (urlsDiscovered === 0) {
     // Both branches are "the funnel is one row, not an empty table" — which row depends on
     // whether the seed itself landed. Claiming "crawled the seed alone" when the seed never
     // fetched is the exact contradiction `"seed_not_fetched"` exists to rule out; see this
     // type's own docstring above.
     return seedFetched ? { kind: "seed_only" } : { kind: "seed_not_fetched" };
+  }
+
+  const dropped = stats.dropped;
+  // Pre-version-9 rows simply have no `dropped` key; `typeof null === "object"` is why `null`
+  // is excluded explicitly rather than by `typeof` alone, and the array check guards against
+  // a value that is technically an object but not the `{rule: count}` map this key promises.
+  if (dropped === null || typeof dropped !== "object" || Array.isArray(dropped)) {
+    // No per-rule split — but `urls_discovered` and `urls_selected` are version-4 keys, so the
+    // two ENDS of the funnel are still on the row, and `discovered - selected` is the total
+    // dropped by construction (`url_ranking.py`'s reconciliation invariant, which every version
+    // since 4 has held). Rendering that, rather than a flat "not available," is the whole point
+    // of this branch: what is missing is which rules fired, not whether any did. `Math.max(0, …)`
+    // is the same clamp `notAttempted` below uses, against a row whose two totals disagree.
+    if (urlsDiscovered === null || urlsSelected === null) return { kind: "unavailable" };
+    return {
+      kind: "totals_only",
+      discovered: urlsDiscovered,
+      selected: urlsSelected,
+      droppedTotal: Math.max(0, urlsDiscovered - urlsSelected),
+      robotsDisallowed: finiteNumber(stats.urls_robots_disallowed),
+    };
   }
 
   const droppedMap = dropped as Record<string, unknown>;
@@ -153,6 +191,28 @@ function selectionState(
 
   const droppedTotal = rows.reduce((sum, row) => sum + row.count, 0);
   return { kind: "breakdown", rows, droppedTotal, selected: urlsSelected ?? 0 };
+}
+
+/**
+ * How many URLs this run's ranking actually kept, or `null` when the row does not say.
+ *
+ * The Selection stage's own headline number, and — because the funnel bars are drawn to one
+ * shared scale — a number the Fetch stage needs too. Written once here rather than as a
+ * `switch` inside the renderer so the two stages can never disagree about it: `"seed_only"` and
+ * `"seed_not_fetched"` both mean zero selected (discovery found nothing to select FROM), and
+ * only `"unavailable"` genuinely does not know.
+ */
+export function selectionSelected(selection: SelectionState): number | null {
+  switch (selection.kind) {
+    case "unavailable":
+      return null;
+    case "seed_not_fetched":
+    case "seed_only":
+      return 0;
+    case "totals_only":
+    case "breakdown":
+      return selection.selected;
+  }
 }
 
 /**

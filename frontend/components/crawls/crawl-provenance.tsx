@@ -1,12 +1,18 @@
 import Link from "next/link";
-import { ChevronRightIcon } from "lucide-react";
+import {
+  ChevronRightIcon,
+  DownloadIcon,
+  FileCode2Icon,
+  ListFilterIcon,
+  NetworkIcon,
+  type LucideIcon,
+} from "lucide-react";
 
 import {
   Table,
   TableBody,
   TableCaption,
   TableCell,
-  TableFooter,
   TableHead,
   TableHeader,
   TableRow,
@@ -15,18 +21,25 @@ import type { RunDetail } from "@/lib/api/runs";
 import {
   capHitCopy,
   discoverySourceCopy,
+  PROVENANCE_BYTES_LABEL,
   PROVENANCE_HEADINGS,
+  PROVENANCE_PREVIEW,
+  PROVENANCE_SEGMENTS,
+  PROVENANCE_STAGE_UNITS,
   PROVENANCE_SUMMARY,
   SELECTION_DOCS_LINK,
+  SELECTION_STATE_COPY,
   selectionRuleCopy,
+  stageUnit,
 } from "@/lib/crawls/provenance-copy";
 import {
   formatBytes,
   runProvenance,
-  type FetchInfo,
+  selectionSelected,
   type RunProvenance,
   type SelectionState,
 } from "@/lib/crawls/run-provenance";
+import { cn } from "@/lib/utils";
 
 import { EmptyCell } from "./empty-cell";
 
@@ -40,26 +53,41 @@ import { EmptyCell } from "./empty-cell";
  * first cut — see `lib/crawls/run-provenance.ts`'s own module docstring for the numbers this
  * reads and `lib/crawls/provenance-copy.ts` for every string it renders.
  *
+ * ## It is drawn as a funnel, because it is one
+ *
+ * Four stages on a single vertical rail, each with a proportional bar drawn to ONE shared
+ * scale (`funnelScale` below), so the narrowing from "URLs discovery found" to "pages that
+ * reached `llms.txt`" is visible before a single number is read. The earlier shape of this
+ * panel — four `<dl>`s of label/value pairs stacked with no relationship drawn between them —
+ * made every stage look like an independent statistic, which is the one thing they are not.
+ *
+ * Each bar's segments are `blue = carried forward, grey = lost here, rose = failed`, plus one
+ * lighter blue that appears exactly once: the seed page, in the Fetch stage. That segment is
+ * the visual half of this module's own arithmetic caveat — a run can fetch MORE pages than
+ * ranking selected, because the seed is fetched separately and is never a member of `selected`
+ * (`lib/crawls/run-provenance.ts`'s invariants section). A funnel that silently widened at one
+ * stage would read as a bug; one that widens by a segment labelled "Seed page" reads as what
+ * happened.
+ *
+ * The bars themselves are `aria-hidden`: every number in them is also in the legend directly
+ * underneath as text, so a screen reader gets the counts once rather than twice, and gets them
+ * from the element that actually spells them out.
+ *
  * ## Five states, driven by `runProvenance(run)`
  *
  * | `run.stats` | rendered |
  * | --- | --- |
  * | absent entirely | nothing — `CrawlProvenance` returns `null` |
- * | present, `dropped` absent (pre-`RUN_STATS_VERSION`-9) | Discovery/Fetch/Index render; Selection says the breakdown isn't available |
- * | present, `urls_discovered === 0`, seed never fetched | Discovery/Fetch/Index render; Discovery and Selection both say nothing was crawled — never "the seed alone," which the seed's own failure to fetch would make false |
- * | present, `urls_discovered === 0`, seed fetched | Discovery/Fetch/Index render; Selection is one sentence, not an empty table |
- * | present, a real breakdown | all four stages, the funnel as a table |
+ * | present, `dropped` absent (pre-`RUN_STATS_VERSION`-9) | all four stages; Selection shows the totals it does have and says the per-rule split was not recorded |
+ * | present, `dropped` absent AND no totals either | all four stages; Selection says nothing about selection was recorded |
+ * | present, `urls_discovered === 0` | all four stages; Discovery and Selection agree on whether the seed itself was crawled, and never claim it was when it was not |
+ * | present, a real breakdown | all four stages, the per-rule table under the Selection bar |
  *
  * A failed run is not a sixth state of this component — it renders whichever of the four
  * stages its own partial `stats` describe, exactly as the ticket's own States section asks
  * ("show whatever stages completed before the failure"). One place `run.status === "failed"`
  * changes wording directly is the Fetch stage's closing sentence, which reports the run
- * failed rather than naming a cap that never actually ended it. The third row above
- * (`"seed_not_fetched"`, `lib/crawls/run-provenance.ts`) is the same idea reaching the
- * Discovery and Selection stages instead — not gated on `status` directly, but in practice
- * only reachable by a failed run, since `internals/crawler.py` never lets a run complete
- * without its seed: a failed seed fetch is real information, not a lower-confidence version
- * of "the seed alone was crawled."
+ * failed rather than naming a cap that never actually ended it.
  *
  * ## Why `<details>`/`<summary>` and not a `components/ui/` primitive
  *
@@ -81,240 +109,471 @@ export function CrawlProvenance({ run }: { run: Pick<RunDetail, "status" | "stat
   const provenance = runProvenance(run);
   if (provenance === null) return null;
 
+  const stages = funnelStages(provenance, run.status);
+  const scale = funnelScale(stages);
+
   return (
     <details className="group rounded-lg border border-border bg-card">
-      <summary
-        className="flex cursor-pointer list-none items-center gap-2 p-4 text-sm font-medium text-foreground [&::-webkit-details-marker]:hidden"
-      >
+      <summary className="flex cursor-pointer list-none items-center gap-2 rounded-lg p-4 text-sm font-medium text-foreground transition-colors hover:bg-accent/40 [&::-webkit-details-marker]:hidden">
         <ChevronRightIcon
           aria-hidden="true"
-          className="size-4 text-muted-foreground transition-transform group-open:rotate-90"
+          className="size-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-90"
         />
-        {PROVENANCE_SUMMARY}
+        <span className="flex-1">{PROVENANCE_SUMMARY}</span>
+        {/* The shape of the run, before it is opened — and hidden once it is, because the
+            funnel below says the same thing better. `aria-hidden` for the same reason the bars
+            are: every number here is repeated as text three lines down. */}
+        <span aria-hidden="true" className="group-open:hidden">
+          <span className="hidden text-xs font-normal tabular-nums text-muted-foreground sm:inline">
+            {funnelPreview(provenance)}
+          </span>
+        </span>
       </summary>
 
-      <div className="space-y-6 border-t border-border p-4">
-        <DiscoverySection provenance={provenance} />
-        <SelectionSection provenance={provenance} />
-        <FetchSection fetch={provenance.fetch} status={run.status} />
-        <IndexSection provenance={provenance} />
-      </div>
+      <ol className="border-t border-border p-4 sm:p-5">
+        {stages.map((stage, index) => (
+          <Stage
+            key={stage.key}
+            stage={stage}
+            scale={scale}
+            isLast={index === stages.length - 1}
+          />
+        ))}
+      </ol>
     </details>
   );
 }
 
-/** One `<dl>` row: a muted label beside a value, the pattern every stage below repeats. */
-function Row({ label, value }: { label: string; value: React.ReactNode }) {
+// ---------------------------------------------------------------------------------------
+// The funnel's own small vocabulary: one segment of one stage's bar, and one stage.
+// ---------------------------------------------------------------------------------------
+
+/** Which fill a segment gets, keyed by what the segment MEANS rather than by which stage it
+ * appears in — so "carried forward" is the same blue in all four stages and "lost here" is the
+ * same grey, which is the entire reason the bars can be compared to each other at a glance.
+ * `--chart-1` is `--primary`; `--chart-3` is two steps lighter in the same hue (app/globals.css).
+ * Rose appears exactly once, on `failed`, and nowhere near `notAttempted` — not attempting a
+ * page because a cap ended the run first is a success, not a failure (ARCHITECTURE.md §3.4). */
+const SEGMENT_FILL = {
+  discovered: "bg-chart-1",
+  selected: "bg-chart-1",
+  dropped: "bg-muted-foreground/25",
+  seed: "bg-chart-3",
+  frontier: "bg-chart-1",
+  failed: "bg-status-failed/45",
+  notAttempted: "bg-muted-foreground/25",
+  listed: "bg-chart-1",
+  omittedEmpty: "bg-muted-foreground/25",
+} as const;
+
+type SegmentKey = keyof typeof SEGMENT_FILL;
+
+interface Segment {
+  key: SegmentKey;
+  value: number;
+}
+
+interface FunnelStage {
+  key: "discovery" | "selection" | "fetch" | "index";
+  heading: React.ReactNode;
+  icon: LucideIcon;
+  /** The stage's headline count, or `null` when this run's `stats` do not record it — an
+   * `EmptyCell`, never a `0` standing in for "unknown". */
+  headline: number | null;
+  unit: { one: string; other: string };
+  /** The line under the heading naming what this stage worked with — the discovery source, or
+   * the byte total. `null` for the stages that have nothing to add beyond their numbers. */
+  subject: React.ReactNode | null;
+  segments: Segment[];
+  /** The one plain-language sentence closing the stage. */
+  note: string | null;
+  /** Anything further this stage renders below its note — today, only Selection's per-rule
+   * table. */
+  detail: React.ReactNode | null;
+}
+
+/** Every segment's value summed — the width one stage's bar occupies before it is scaled
+ * against the other three. */
+function stageTotal(stage: FunnelStage): number {
+  return stage.segments.reduce((sum, segment) => sum + segment.value, 0);
+}
+
+/**
+ * The denominator all four bars are drawn against: the widest stage.
+ *
+ * One shared scale is what makes this a funnel rather than four unrelated progress bars — a
+ * per-stage scale would draw "1 page listed of 1" and "412 URLs of 412" as the same full-width
+ * bar. Floored at 1 so a run where every stage is zero divides by something.
+ */
+function funnelScale(stages: FunnelStage[]): number {
+  return Math.max(1, ...stages.map(stageTotal));
+}
+
+/** The `<summary>` line's micro-summary — "2 found · 3 fetched · 1 listed", with any part this
+ * run never recorded left out rather than shown as a zero. */
+function funnelPreview(provenance: RunProvenance): string {
+  const parts: string[] = [];
+  if (provenance.urlsDiscovered !== null) {
+    parts.push(`${provenance.urlsDiscovered.toLocaleString()} ${PROVENANCE_PREVIEW.found}`);
+  }
+  parts.push(`${fetchedTotal(provenance).toLocaleString()} ${PROVENANCE_PREVIEW.fetched}`);
+  if (provenance.index.kind === "stored") {
+    parts.push(`${provenance.index.indexed.toLocaleString()} ${PROVENANCE_PREVIEW.listed}`);
+  }
+  return parts.join(" · ");
+}
+
+/** Pages actually fetched, seed included — `FetchInfo` splits the seed out on purpose (see
+ * `run-provenance.ts`), and this is the one place the two halves are added back together. */
+function fetchedTotal(provenance: RunProvenance): number {
+  return provenance.fetch.frontierFetched + (provenance.fetch.seedFetched ? 1 : 0);
+}
+
+/**
+ * `RunProvenance` turned into the four stages the panel draws, in execution order.
+ *
+ * Built as data rather than as four bespoke JSX blocks for one reason that is not tidiness:
+ * `funnelScale` has to see every stage's segments BEFORE any bar is rendered, because they
+ * share a denominator. Four components each computing their own bar could not have one.
+ */
+function funnelStages(provenance: RunProvenance, status: RunDetail["status"]): FunnelStage[] {
+  const { fetch, index, selection } = provenance;
+  const discovered = provenance.urlsDiscovered;
+  const source = discoverySourceCopy(provenance.discoverySource, fetch.seedFetched);
+  const selected = selectionSelected(selection);
+
+  return [
+    {
+      key: "discovery",
+      heading: PROVENANCE_HEADINGS.discovery,
+      icon: NetworkIcon,
+      headline: discovered,
+      unit: PROVENANCE_STAGE_UNITS.discovery,
+      subject:
+        source === null ? <EmptyCell label="discovery source not recorded for this run" /> : source.label,
+      segments: [{ key: "discovered", value: discovered ?? 0 }],
+      note: source?.explanation ?? null,
+      detail: null,
+    },
+    {
+      key: "selection",
+      heading: (
+        <Link
+          href={SELECTION_DOCS_LINK.href}
+          className="underline-offset-4 hover:text-foreground hover:underline"
+        >
+          {PROVENANCE_HEADINGS.selection}
+        </Link>
+      ),
+      icon: ListFilterIcon,
+      headline: selected,
+      unit: PROVENANCE_STAGE_UNITS.selection,
+      subject: null,
+      segments: selectionSegments(selection),
+      note: selectionNote(selection),
+      detail: <SelectionRules selection={selection} />,
+    },
+    {
+      key: "fetch",
+      icon: DownloadIcon,
+      heading: PROVENANCE_HEADINGS.fetch,
+      headline: fetchedTotal(provenance),
+      unit: PROVENANCE_STAGE_UNITS.fetch,
+      subject: (
+        <span className="text-muted-foreground">
+          {PROVENANCE_BYTES_LABEL}{" "}
+          <span className="tabular-nums text-foreground">
+            {fetch.bytesFetched === null ? (
+              <EmptyCell label="byte total not recorded for this run" />
+            ) : (
+              formatBytes(fetch.bytesFetched)
+            )}
+          </span>
+        </span>
+      ),
+      segments: [
+        { key: "seed", value: fetch.seedFetched ? 1 : 0 },
+        { key: "frontier", value: fetch.frontierFetched },
+        { key: "failed", value: fetch.failed },
+        { key: "notAttempted", value: fetch.notAttempted },
+      ],
+      // A failed run names its failure rather than a cap that never actually ended it — a run
+      // that died mid-fetch did not "finish before any budget ran out", which is what
+      // `capHitCopy(null)` would have claimed.
+      note:
+        status === "failed"
+          ? "This run failed before fetching finished."
+          : capHitCopy(fetch.capHit),
+      detail: null,
+    },
+    {
+      key: "index",
+      heading: PROVENANCE_HEADINGS.index,
+      icon: FileCode2Icon,
+      headline: index.kind === "stored" ? index.indexed : null,
+      unit: PROVENANCE_STAGE_UNITS.index,
+      subject: null,
+      segments:
+        index.kind === "stored"
+          ? [
+              { key: "listed", value: index.indexed },
+              { key: "omittedEmpty", value: index.omittedEmpty },
+            ]
+          : [],
+      note: index.kind === "stored" ? null : "No index was stored for this run.",
+      detail: null,
+    },
+  ];
+}
+
+/** The Selection bar: kept beside lost, in every state that knows both numbers. The two states
+ * that know neither (`"unavailable"`) or that have nothing to split (`"seed_only"`,
+ * `"seed_not_fetched"` — discovery found nothing to select FROM) render an empty track under
+ * the sentence that explains why, rather than a zero-width bar pretending to be data. */
+function selectionSegments(selection: SelectionState): Segment[] {
+  switch (selection.kind) {
+    case "unavailable":
+    case "seed_not_fetched":
+    case "seed_only":
+      return [];
+    case "totals_only":
+    case "breakdown":
+      return [
+        { key: "selected", value: selection.selected },
+        { key: "dropped", value: selection.droppedTotal },
+      ];
+  }
+}
+
+function selectionNote(selection: SelectionState): string | null {
+  switch (selection.kind) {
+    case "unavailable":
+      return SELECTION_STATE_COPY.unavailable;
+    case "seed_not_fetched":
+      return SELECTION_STATE_COPY.seedNotFetched;
+    case "seed_only":
+      return SELECTION_STATE_COPY.seedOnly;
+    case "totals_only":
+      return SELECTION_STATE_COPY.totalsOnly;
+    case "breakdown":
+      // A real breakdown with nothing in it is not an empty table — it is a run where ranking
+      // kept everything discovery found, which is a result worth stating in words.
+      return selection.rows.length === 0 ? SELECTION_STATE_COPY.nothingDropped : null;
+  }
+}
+
+// ---------------------------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------------------------
+
+/**
+ * One stage: an icon on the rail, its heading and headline number, its bar, its legend, its
+ * sentence, and whatever detail it carries.
+ *
+ * The rail is the vertical line between icons — `flex-1` inside the grid's first column, which
+ * stretches to the row's height, so a stage with a long table under it gets a long connector
+ * with no measurement anywhere. `<li>` in an `<ol>`: these are four ordered steps of one
+ * process, and that ordering is information a screen reader should get from the markup rather
+ * than from the icons it cannot see.
+ */
+function Stage({
+  stage,
+  scale,
+  isLast,
+}: {
+  stage: FunnelStage;
+  scale: number;
+  isLast: boolean;
+}) {
+  const Icon = stage.icon;
+
   return (
-    <div className="flex items-center gap-2">
-      <dt className="text-muted-foreground">{label}</dt>
-      <dd className="tabular-nums text-foreground">{value}</dd>
+    <li className="grid grid-cols-[1.75rem_minmax(0,1fr)] gap-x-3 sm:grid-cols-[2rem_minmax(0,1fr)] sm:gap-x-4">
+      <div className="flex flex-col items-center">
+        <span className="flex size-7 items-center justify-center rounded-full bg-primary/8 text-primary ring-1 ring-primary/15 ring-inset sm:size-8">
+          <Icon aria-hidden="true" className="size-3.5 sm:size-4" />
+        </span>
+        {!isLast && (
+          <span
+            aria-hidden="true"
+            className="mt-1.5 w-px flex-1 bg-gradient-to-b from-border via-border to-border/30"
+          />
+        )}
+      </div>
+
+      <div className={cn("min-w-0", !isLast && "pb-7")}>
+        <div className="flex flex-wrap items-baseline justify-between gap-x-3">
+          <h4 className="text-xs font-semibold tracking-wider text-muted-foreground uppercase">
+            {stage.heading}
+          </h4>
+          <p className="text-sm text-muted-foreground">
+            <span className="text-base font-semibold tabular-nums text-foreground">
+              {stage.headline === null ? (
+                <EmptyCell label="not recorded for this run" />
+              ) : (
+                stage.headline.toLocaleString()
+              )}
+            </span>{" "}
+            {stageUnit(stage.unit, stage.headline)}
+          </p>
+        </div>
+
+        {stage.subject !== null && (
+          <p className="mt-1 text-sm text-foreground">{stage.subject}</p>
+        )}
+
+        <FunnelBar segments={stage.segments} scale={scale} />
+        <SegmentLegend segments={stage.segments} headline={stage.headline} />
+
+        {stage.note !== null && (
+          <p className="mt-2 text-xs text-muted-foreground">{stage.note}</p>
+        )}
+        {stage.detail}
+      </div>
+    </li>
+  );
+}
+
+/** One stage's bar, drawn against the funnel's shared scale. `aria-hidden` — `SegmentLegend`
+ * directly below carries every number in it as text. */
+function FunnelBar({ segments, scale }: { segments: Segment[]; scale: number }) {
+  return (
+    <div
+      aria-hidden="true"
+      className="mt-2.5 flex h-2 w-full overflow-hidden rounded-full bg-muted"
+    >
+      {segments
+        .filter((segment) => segment.value > 0)
+        .map((segment) => (
+          <div
+            key={segment.key}
+            className={SEGMENT_FILL[segment.key]}
+            style={{ width: `${(segment.value / scale) * 100}%` }}
+          />
+        ))}
     </div>
   );
 }
 
-function StageHeading({ children }: { children: React.ReactNode }) {
-  return <h4 className="text-sm font-medium text-foreground">{children}</h4>;
-}
-
-function DiscoverySection({ provenance }: { provenance: RunProvenance }) {
-  const source = provenance.discoverySource;
-  const copy = discoverySourceCopy(source, provenance.fetch.seedFetched);
+/**
+ * The counts under a bar, one entry per segment, each with the swatch that ties it to its band.
+ *
+ * Zero-valued segments are dropped, so a legend never lists outcomes that did not occur — and
+ * a legend left with ONE segment is dropped entirely IF that segment is the number the stage's
+ * headline already reported. "412 URLs found" directly above "Discovered 412" is the same fact
+ * twice, and on a clean run — nothing dropped, nothing failed, nothing omitted — that is every
+ * stage.
+ *
+ * The `headline` comparison rather than a bare `length < 2` is what keeps the one case where a
+ * single segment is worth saying out loud: a failed run's Fetch stage, whose headline is "0
+ * pages fetched" over a bar that is entirely the `failed` band. Suppressing that legend would
+ * leave a full-width rose bar on screen with nothing anywhere naming it.
+ */
+function SegmentLegend({
+  segments,
+  headline,
+}: {
+  segments: Segment[];
+  headline: number | null;
+}) {
+  const shown = segments.filter((segment) => segment.value > 0);
+  if (shown.length === 0) return null;
+  if (shown.length === 1 && shown[0].value === headline) return null;
 
   return (
-    <section>
-      <StageHeading>{PROVENANCE_HEADINGS.discovery}</StageHeading>
-      <dl className="mt-2 space-y-1 text-sm">
-        <Row
-          label="Source"
-          value={copy === null ? <EmptyCell label="not recorded for this run" /> : copy.label}
-        />
-        <Row
-          label="URLs discovered"
-          value={
-            provenance.urlsDiscovered === null ? (
-              <EmptyCell label="not recorded for this run" />
-            ) : (
-              provenance.urlsDiscovered.toLocaleString()
-            )
-          }
-        />
-      </dl>
-      {copy !== null && <p className="mt-1 text-xs text-muted-foreground">{copy.explanation}</p>}
-    </section>
+    <ul className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
+      {shown.map((segment) => (
+        <li key={segment.key} className="flex items-center gap-1.5">
+          <span
+            aria-hidden="true"
+            className={cn("size-2 shrink-0 rounded-full", SEGMENT_FILL[segment.key])}
+          />
+          <span className="text-muted-foreground">{PROVENANCE_SEGMENTS[segment.key]}</span>
+          <span className="font-medium tabular-nums text-foreground">
+            {segment.value.toLocaleString()}
+          </span>
+        </li>
+      ))}
+    </ul>
   );
 }
 
-function SelectionSection({ provenance }: { provenance: RunProvenance }) {
-  return (
-    <section>
-      <StageHeading>
-        <Link
-          href={SELECTION_DOCS_LINK.href}
-          className="text-primary underline-offset-4 hover:underline"
-        >
-          {PROVENANCE_HEADINGS.selection}
-        </Link>
-      </StageHeading>
-      <div className="mt-2">
-        <SelectionBody
-          selection={provenance.selection}
-          urlsDiscovered={provenance.urlsDiscovered}
-        />
-      </div>
-    </section>
-  );
-}
+/**
+ * The per-rule breakdown under the Selection bar — which rules did the dropping, and how much
+ * each one dropped.
+ *
+ * Two columns, deliberately: the label/explanation pair is what makes each rule concrete with
+ * no example URLs, and a third column for the explanation would break at 375px.
+ *
+ * `"totals_only"` renders here too, with the one rule that survives on a version-6-to-8 row
+ * (`urls_robots_disallowed`) — the alternative was to render nothing and let one sentence carry
+ * a stage that still has a real number in it. Everything else it dropped goes under a single
+ * unnamed remainder row, which is exactly as much as the row records.
+ */
+function SelectionRules({ selection }: { selection: SelectionState }) {
+  const rows =
+    selection.kind === "breakdown"
+      ? selection.rows.map((row) => ({ ...selectionRuleCopy(row.key), count: row.count }))
+      : selection.kind === "totals_only"
+        ? totalsOnlyRules(selection)
+        : [];
 
-function SelectionBody({
-  selection,
-  urlsDiscovered,
-}: {
-  selection: SelectionState;
-  urlsDiscovered: number | null;
-}) {
-  switch (selection.kind) {
-    case "unavailable":
-      return (
-        <p className="text-sm text-muted-foreground">
-          The selection breakdown isn&apos;t available for this run.
-        </p>
-      );
-
-    case "seed_not_fetched":
-      return (
-        <p className="text-sm text-muted-foreground">
-          Discovery found nothing for this run, and the seed page itself could not be fetched
-          — nothing was crawled.
-        </p>
-      );
-
-    case "seed_only":
-      return (
-        <p className="text-sm text-muted-foreground">
-          Discovery found nothing for this run — it crawled the seed page alone.
-        </p>
-      );
-
-    case "breakdown":
-      return (
-        <div className="space-y-2">
-          <p className="text-sm text-foreground">
-            <span className="tabular-nums font-medium">
-              {urlsDiscovered === null ? "—" : urlsDiscovered.toLocaleString()}
-            </span>{" "}
-            discovered
-          </p>
-
-          {/* Two columns, deliberately — the label/explanation pair is what makes each rule
-              concrete with no example URLs, and a third column for it would break at 375px. */}
-          <Table>
-            <TableCaption className="sr-only">
-              Selection rules, in the order they were checked, and how many candidate URLs each
-              one dropped
-            </TableCaption>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Rule</TableHead>
-                <TableHead className="text-right">URLs dropped</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {selection.rows.map((row) => {
-                const copy = selectionRuleCopy(row.key);
-                return (
-                  <TableRow key={row.key}>
-                    <TableHead scope="row" className="h-auto py-2 align-top whitespace-normal">
-                      <span className="block font-medium text-foreground">{copy.label}</span>
-                      {copy.explanation !== null && (
-                        <span className="mt-0.5 block text-xs font-normal text-muted-foreground">
-                          {copy.explanation}
-                        </span>
-                      )}
-                    </TableHead>
-                    <TableCell className="text-right align-top tabular-nums">
-                      -{row.count.toLocaleString()}
-                    </TableCell>
-                  </TableRow>
-                );
-              })}
-            </TableBody>
-            <TableFooter>
-              <TableRow>
-                <TableCell className="font-medium text-foreground">Selected</TableCell>
-                <TableCell className="text-right font-medium tabular-nums text-foreground">
-                  {selection.selected.toLocaleString()}
-                </TableCell>
-              </TableRow>
-            </TableFooter>
-          </Table>
-        </div>
-      );
-  }
-}
-
-function FetchSection({
-  fetch,
-  status,
-}: {
-  fetch: FetchInfo;
-  status: RunDetail["status"];
-}) {
-  const totalFetched = fetch.frontierFetched + (fetch.seedFetched ? 1 : 0);
+  if (rows.length === 0) return null;
 
   return (
-    <section>
-      <StageHeading>{PROVENANCE_HEADINGS.fetch}</StageHeading>
-      <dl className="mt-2 space-y-1 text-sm">
-        <Row
-          label="Fetched"
-          value={
-            <>
-              {totalFetched.toLocaleString()}
-              {fetch.seedFetched && (
-                <span className="ml-1 text-xs text-muted-foreground">(including the seed)</span>
+    <Table className="mt-3">
+      <TableCaption className="sr-only">
+        Selection rules, in the order they were checked, and how many candidate URLs each one
+        dropped
+      </TableCaption>
+      <TableHeader>
+        <TableRow>
+          <TableHead>Rule</TableHead>
+          <TableHead className="text-right">URLs dropped</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {rows.map((row) => (
+          <TableRow key={row.label}>
+            <TableHead scope="row" className="h-auto py-2 align-top whitespace-normal">
+              <span className="block font-medium text-foreground">{row.label}</span>
+              {row.explanation !== null && (
+                <span className="mt-0.5 block text-xs font-normal text-muted-foreground">
+                  {row.explanation}
+                </span>
               )}
-            </>
-          }
-        />
-        <Row label="Failed" value={fetch.failed.toLocaleString()} />
-        {fetch.notAttempted > 0 && (
-          <Row label="Not attempted" value={fetch.notAttempted.toLocaleString()} />
-        )}
-        <Row
-          label="Bytes"
-          value={
-            fetch.bytesFetched === null ? (
-              <EmptyCell label="not recorded for this run" />
-            ) : (
-              formatBytes(fetch.bytesFetched)
-            )
-          }
-        />
-      </dl>
-      <p className="mt-2 text-xs text-muted-foreground">
-        {status === "failed"
-          ? "This run failed before fetching finished."
-          : capHitCopy(fetch.capHit)}
-      </p>
-    </section>
+            </TableHead>
+            <TableCell className="text-right align-top tabular-nums">
+              -{row.count.toLocaleString()}
+            </TableCell>
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
   );
 }
 
-function IndexSection({ provenance }: { provenance: RunProvenance }) {
-  const { index } = provenance;
+/** The most a version-6-to-8 row can say about which rules fired: the robots.txt count it
+ * recorded by name, and everything else as one unnamed remainder. Empty when neither is
+ * nonzero — a run that dropped nothing has no rules to list, and the stage's own
+ * `nothingDropped`-shaped sentence has already said so. */
+function totalsOnlyRules(
+  selection: Extract<SelectionState, { kind: "totals_only" }>
+): { label: string; explanation: string | null; count: number }[] {
+  const robots = selection.robotsDisallowed ?? 0;
+  const remainder = Math.max(0, selection.droppedTotal - robots);
 
-  return (
-    <section>
-      <StageHeading>{PROVENANCE_HEADINGS.index}</StageHeading>
-      {index.kind === "not_stored" ? (
-        <p className="mt-2 text-sm text-muted-foreground">No index was stored for this run.</p>
-      ) : (
-        <dl className="mt-2 space-y-1 text-sm">
-          <Row label="Pages in llms.txt" value={index.indexed.toLocaleString()} />
-          <Row label="Omitted as empty" value={index.omittedEmpty.toLocaleString()} />
-        </dl>
-      )}
-    </section>
-  );
+  return [
+    ...(robots > 0 ? [{ ...selectionRuleCopy("robots_disallowed"), count: robots }] : []),
+    ...(remainder > 0
+      ? [
+          {
+            label: "Rule not recorded",
+            explanation:
+              "Dropped by one of the twelve selection rules — this run predates the per-rule counters, so which one is not on the record.",
+            count: remainder,
+          },
+        ]
+      : []),
+  ];
 }
