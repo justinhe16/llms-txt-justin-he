@@ -9,7 +9,8 @@
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
     "smoke": "node scripts/smoke.mjs",
-    "gen:api": "openapi-typescript lib/api/openapi.json -o lib/api/schema.d.ts"
+    "gen:api": "openapi-typescript lib/api/openapi.json -o lib/api/schema.d.ts",
+    "test": "vitest run"
   },
   "dependencies": {
     "@mdx-js/loader": "^3.1.1",
@@ -44,6 +45,7 @@
     "openapi-typescript": "^7.13.0",
     "puppeteer-core": "^24.30.0",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vitest": "3.2.4"
   }
 }

@@ -14,7 +14,7 @@ import httpx
 from app.core.settings import Settings
 
 
-CRAWL_USER_AGENT = "llms-text-bot/0.1 (+https://github.com/justinhe16/llms-text-justin-he)"
+CRAWL_USER_AGENT = "llms-text-bot/0.1 (+https://github.com/justinhe16/llms-txt-justin-he)"
 """Identifies every crawl request as this project's, with a URL a site operator can visit
 to find out what is fetching their pages and how to block it. A descriptive UA is a
 courtesy this crawler can afford to extend and cannot afford to skip: it is one grep away

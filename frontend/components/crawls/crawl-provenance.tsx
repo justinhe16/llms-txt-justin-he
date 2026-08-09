@@ -194,6 +194,10 @@ const SEGMENT_FILL = {
   notAttempted: "bg-muted-foreground/25",
   listed: "bg-chart-1",
   omittedEmpty: "bg-muted-foreground/25",
+  // Same neutral grey as every other omission: a 404 or a cross-origin redirect is a
+  // page this run correctly declined to index, not something that went wrong.
+  omittedHttpError: "bg-muted-foreground/25",
+  omittedOffOrigin: "bg-muted-foreground/25",
 } as const;
 
 type SegmentKey = keyof typeof SEGMENT_FILL;
@@ -384,6 +388,8 @@ function funnelStages(provenance: RunProvenance, status: RunDetail["status"]): F
           ? [
               { key: "listed", value: index.indexed },
               { key: "omittedEmpty", value: index.omittedEmpty },
+              { key: "omittedHttpError", value: index.omittedHttpError },
+              { key: "omittedOffOrigin", value: index.omittedOffOrigin },
             ]
           : [],
       note: index.kind === "stored" ? null : "No index was stored for this run.",

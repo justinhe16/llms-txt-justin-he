@@ -38,6 +38,12 @@ from app.features.crawl.internals.url_ranking import normalize_url
 from app.features.crawl.schemas import CrawledPage
 
 
+_SITE = "https://example.test"
+"""The registered site every page in this module's fixtures belongs to — the `site_url`
+both artifacts are built for. One constant rather than a literal per call so a test that
+means to use a DIFFERENT origin (the off-origin exclusion cases) is visibly doing so."""
+
+
 # Long enough to clear `internals/extract.py`'s `MIN_BODY_CHARS`, matching
 # `tests/test_llms_txt.py`'s own `_BODY` — a page built with it is one the extractor would
 # have accepted as non-empty, so it always survives into `generate_llms_txt`'s index.
@@ -131,12 +137,12 @@ def _diff(
 # -----------------------------------------------------------------------------------------
 
 
-def test_parse_index_round_trips_generate_llms_txt() -> None:
+def test_parse_index_round_trips_generate_llms_txt(site_url=_SITE) -> None:
     """Adversarial metadata on both sides of a bullet: a title containing `[`, `]`, and a
     backslash; a URL containing a space, both parens, and a pre-existing `%2F` that must
     survive untouched (the reverse of exactly the five `_TARGET_ESCAPES` pairs, never
     `urllib.parse.unquote`). Hand-written expected tuples, not a self-consistency check —
-    `parse_index(generate_llms_txt(pages)) == pages` would still pass if both sides of the
+    `parse_index(generate_llms_txt(pages, site_url=_SITE)) == pages` would still pass if both sides of the
     round trip shared the same bug.
     """
     pages = [
@@ -148,7 +154,7 @@ def test_parse_index_round_trips_generate_llms_txt() -> None:
         ),
     ]
 
-    output = generate_llms_txt(pages)
+    output = generate_llms_txt(pages, site_url=_SITE)
     entries = parse_index(output)
 
     actual = [(entry.section, entry.url, entry.title, entry.description) for entry in entries]
@@ -176,8 +182,8 @@ def test_a_trailing_slash_change_is_not_a_page_swap() -> None:
     """The named acceptance criterion: URL matching is normalized on `key`
     (`normalize_url`), so a trailing-slash-only change compares as the SAME page rather than
     one removed and a different one added."""
-    previous_txt = generate_llms_txt([_page("https://example.test/docs/intro")])
-    current_txt = generate_llms_txt([_page("https://example.test/docs/intro/")])
+    previous_txt = generate_llms_txt([_page("https://example.test/docs/intro")], site_url=_SITE)
+    current_txt = generate_llms_txt([_page("https://example.test/docs/intro/")], site_url=_SITE)
 
     diff = _diff(
         current_llms_txt=current_txt,
@@ -192,8 +198,12 @@ def test_a_trailing_slash_change_is_not_a_page_swap() -> None:
 
 
 def test_a_title_change_on_the_same_url_is_a_change_not_an_add_and_a_remove() -> None:
-    previous_txt = generate_llms_txt([_page("https://example.test/docs/intro", title="Old Title")])
-    current_txt = generate_llms_txt([_page("https://example.test/docs/intro", title="New Title")])
+    previous_txt = generate_llms_txt(
+        [_page("https://example.test/docs/intro", title="Old Title")], site_url=_SITE
+    )
+    current_txt = generate_llms_txt(
+        [_page("https://example.test/docs/intro", title="New Title")], site_url=_SITE
+    )
 
     diff = _diff(
         current_llms_txt=current_txt,
@@ -213,10 +223,12 @@ def test_a_title_change_on_the_same_url_is_a_change_not_an_add_and_a_remove() ->
 
 def test_a_description_change_alone_counts_as_changed() -> None:
     previous_txt = generate_llms_txt(
-        [_page("https://example.test/docs/intro", title="Intro", description="Old description.")]
+        [_page("https://example.test/docs/intro", title="Intro", description="Old description.")],
+        site_url=_SITE,
     )
     current_txt = generate_llms_txt(
-        [_page("https://example.test/docs/intro", title="Intro", description="New description.")]
+        [_page("https://example.test/docs/intro", title="Intro", description="New description.")],
+        site_url=_SITE,
     )
 
     diff = _diff(
@@ -232,9 +244,11 @@ def test_a_description_change_alone_counts_as_changed() -> None:
 
 
 def test_samples_are_capped_at_ten_and_the_true_count_is_recorded() -> None:
-    previous_txt = generate_llms_txt([_page("https://example.test/docs/seed")])
+    previous_txt = generate_llms_txt([_page("https://example.test/docs/seed")], site_url=_SITE)
     added_pages = [_page(f"https://example.test/docs/page-{i:02d}") for i in range(25)]
-    current_txt = generate_llms_txt([_page("https://example.test/docs/seed"), *added_pages])
+    current_txt = generate_llms_txt(
+        [_page("https://example.test/docs/seed"), *added_pages], site_url=_SITE
+    )
 
     diff = _diff(
         current_llms_txt=current_txt,
@@ -281,14 +295,16 @@ def test_samples_are_deterministic_under_a_shuffled_input() -> None:
 
 def test_sections_delta_lists_only_sections_that_changed() -> None:
     previous_txt = generate_llms_txt(
-        [_page("https://example.test/docs/a"), _page("https://example.test/guide/a")]
+        [_page("https://example.test/docs/a"), _page("https://example.test/guide/a")],
+        site_url=_SITE,
     )
     current_txt = generate_llms_txt(
         [
             _page("https://example.test/docs/a"),
             _page("https://example.test/docs/b"),
             _page("https://example.test/guide/a"),
-        ]
+        ],
+        site_url=_SITE,
     )
 
     diff = _diff(
@@ -364,8 +380,12 @@ def test_previous_run_completed_is_threaded_through_both_states() -> None:
 def test_llms_txt_bytes_delta_is_measured_in_utf8_bytes() -> None:
     """A CJK title makes a character count and a UTF-8 byte count disagree, which is exactly
     what pins this to `.encode()` rather than `len(str)`."""
-    previous_txt = generate_llms_txt([_page("https://example.test/docs/a", title="A")])
-    current_txt = generate_llms_txt([_page("https://example.test/docs/a", title="文档标题")])
+    previous_txt = generate_llms_txt(
+        [_page("https://example.test/docs/a", title="A")], site_url=_SITE
+    )
+    current_txt = generate_llms_txt(
+        [_page("https://example.test/docs/a", title="文档标题")], site_url=_SITE
+    )
 
     diff = _diff(
         current_llms_txt=current_txt,
@@ -381,7 +401,7 @@ def test_llms_txt_bytes_delta_is_measured_in_utf8_bytes() -> None:
 def test_sample_titles_are_truncated_at_the_documented_cap() -> None:
     long_title = "T" * (MAX_SAMPLE_TITLE_CHARS + 50)
     current_txt = generate_llms_txt(
-        [_page("https://example.test/docs/long-title", title=long_title)]
+        [_page("https://example.test/docs/long-title", title=long_title)], site_url=_SITE
     )
 
     diff = _diff(
@@ -423,8 +443,8 @@ def test_content_changed_counts_only_keys_whose_body_hash_differs() -> None:
     unchanged_page_previous = _page("https://example.test/docs/b", markdown=_BODY)
     unchanged_page_current = _page("https://example.test/docs/b", markdown=_BODY)
 
-    previous_txt = generate_llms_txt([previous_page, unchanged_page_previous])
-    current_txt = generate_llms_txt([current_page_changed, unchanged_page_current])
+    previous_txt = generate_llms_txt([previous_page, unchanged_page_previous], site_url=_SITE)
+    current_txt = generate_llms_txt([current_page_changed, unchanged_page_current], site_url=_SITE)
 
     diff = _diff(
         current_llms_txt=current_txt,
@@ -450,7 +470,7 @@ def test_content_changed_is_none_when_the_previous_run_recorded_no_hashes() -> N
     """A previous row that predates `RUN_STATS_VERSION` 8 has no `content_hashes` of its own —
     `None`, not `0`, is what a comparison against an unknown map must report."""
     page = _page("https://example.test/docs/a")
-    txt = generate_llms_txt([page])
+    txt = generate_llms_txt([page], site_url=_SITE)
 
     diff = _diff(
         current_llms_txt=txt,
@@ -490,8 +510,8 @@ def test_extra_hash_keys_with_no_index_entry_never_join() -> None:
     extra_previous = _page("https://example.test/uncounted", markdown=_BODY + " extra one.")
     extra_current = _page("https://example.test/uncounted", markdown=_BODY + " extra two.")
 
-    previous_txt = generate_llms_txt([indexed_previous])
-    current_txt = generate_llms_txt([indexed_current])
+    previous_txt = generate_llms_txt([indexed_previous], site_url=_SITE)
+    current_txt = generate_llms_txt([indexed_current], site_url=_SITE)
 
     diff = _diff(
         current_llms_txt=current_txt,
@@ -526,8 +546,8 @@ def test_a_mode_change_still_reports_a_genuine_content_change() -> None:
     removed_page = _page("https://example.test/docs/removed", markdown=_BODY, title="Removed")
     added_page = _page("https://example.test/guide/added", markdown=_BODY, title="Added")
 
-    previous_txt = generate_llms_txt([kept_previous, removed_page])
-    current_txt = generate_llms_txt([kept_current, added_page])
+    previous_txt = generate_llms_txt([kept_previous, removed_page], site_url=_SITE)
+    current_txt = generate_llms_txt([kept_current, added_page], site_url=_SITE)
 
     diff = _diff(
         current_llms_txt=current_txt,
@@ -561,8 +581,12 @@ def test_two_runs_in_the_same_mode_diff_exactly_as_they_do_today() -> None:
     """The named same-mode regression test — both sides `enrich_applied=False`, exactly the
     pre-PER-194 behaviour every other test in this file already pins, restated once more here
     as the explicit contrast to the mode-change test above."""
-    previous_txt = generate_llms_txt([_page("https://example.test/docs/a", title="Old Title")])
-    current_txt = generate_llms_txt([_page("https://example.test/docs/a", title="New Title")])
+    previous_txt = generate_llms_txt(
+        [_page("https://example.test/docs/a", title="Old Title")], site_url=_SITE
+    )
+    current_txt = generate_llms_txt(
+        [_page("https://example.test/docs/a", title="New Title")], site_url=_SITE
+    )
 
     diff = _diff(
         current_llms_txt=current_txt,
@@ -583,8 +607,12 @@ def test_an_unknown_previous_mode_is_treated_as_comparable() -> None:
     """A pre-`RUN_STATS_VERSION`-8 previous row has `enrich_applied is None` — treated as
     COMPARABLE, not as an unknown mode that blanks the signal, so every existing website's
     first post-deploy run still reports a real `metadata_changed` count."""
-    previous_txt = generate_llms_txt([_page("https://example.test/docs/a", title="Old Title")])
-    current_txt = generate_llms_txt([_page("https://example.test/docs/a", title="New Title")])
+    previous_txt = generate_llms_txt(
+        [_page("https://example.test/docs/a", title="Old Title")], site_url=_SITE
+    )
+    current_txt = generate_llms_txt(
+        [_page("https://example.test/docs/a", title="New Title")], site_url=_SITE
+    )
 
     diff = _diff(
         current_llms_txt=current_txt,
@@ -601,7 +629,7 @@ def test_an_unknown_previous_mode_is_treated_as_comparable() -> None:
 def test_the_reason_names_which_direction_the_mode_flipped() -> None:
     """Two runs, both otherwise identical, disagreeing only in which way the flip went — the
     reason string must name the CURRENT run's own mode, not merely "a flip happened"."""
-    txt = generate_llms_txt([_page("https://example.test/docs/a", title="A")])
+    txt = generate_llms_txt([_page("https://example.test/docs/a", title="A")], site_url=_SITE)
 
     enabled = _diff(
         current_llms_txt=txt,

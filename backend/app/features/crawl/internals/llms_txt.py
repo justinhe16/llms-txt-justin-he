@@ -3,7 +3,7 @@ corpus behind it). Pure functions — no network, no clock, no I/O, nothing that
 setting.
 
 **This module was THE STUB SEAM, and is no longer one.** ARCHITECTURE.md §3.4 and CLAUDE.md
-#9 held everything downstream of a fetched page behind `generate_llms_txt(pages) -> str`
+#9 held everything downstream of a fetched page behind `generate_llms_txt(pages, *, site_url)`
 while that pipeline was undesigned, and until PER-179 this function honoured that by
 returning an H1, a blockquote disclaiming itself as provisional, and one bullet per fetched
 URL. The pipeline is designed now and this module implements it. What the old docstring
@@ -224,7 +224,7 @@ class _Entry:
     markdown: str
 
 
-def generate_llms_txt(pages: list[CrawledPage]) -> str:
+def generate_llms_txt(pages: list[CrawledPage], *, site_url: str) -> str:
     """Build the `llms.txt` index for `pages`, in the llmstxt.org shape.
 
     Exactly one H1 (the project name), exactly one blockquote (a factual summary), then an H2
@@ -254,6 +254,11 @@ def generate_llms_txt(pages: list[CrawledPage]) -> str:
         pages: Every page `internals/crawler.py`'s `crawl_site` collected for one run, in
             whatever order they finished fetching. Never sorted by the caller — sorting
             happens here, once, so every caller gets determinism for free.
+        site_url: The site this artifact is ABOUT — any URL on it; only its scheme and host
+            are read. Supplied by the caller rather than derived from `pages`, because a
+            derived origin can be outvoted by one redirected page (see `_origin`). The
+            service passes `CrawlResult.seed_origin` — where the seed actually landed —
+            falling back to the registered website URL.
 
     Returns:
         The artifact, ending in a newline. `_EMPTY_DOCUMENT` for `pages == []`.
@@ -261,8 +266,8 @@ def generate_llms_txt(pages: list[CrawledPage]) -> str:
     if not pages:
         return _EMPTY_DOCUMENT
 
-    origin = _origin(pages)
-    entries = _index_entries(pages)
+    origin = _origin(site_url)
+    entries = _index_entries(pages, origin)
     lines = [
         f"# {_project_name(pages, origin)}",
         "",
@@ -280,7 +285,7 @@ def generate_llms_txt(pages: list[CrawledPage]) -> str:
     return "\n".join(lines)
 
 
-def generate_llms_full_txt(pages: list[CrawledPage]) -> str:
+def generate_llms_full_txt(pages: list[CrawledPage], *, site_url: str) -> str:
     """Build the `llms-full.txt` corpus for `pages`: the same H1 and a blockquote of its own,
     then `## {title}` and that page's markdown, once per page, **in the same order the index
     lists them** — section order first, then URL order within a section, not plain URL order
@@ -307,15 +312,16 @@ def generate_llms_full_txt(pages: list[CrawledPage]) -> str:
 
     Args:
         pages: As `generate_llms_txt`.
+        site_url: As `generate_llms_txt`.
 
     Returns:
         The artifact. `_EMPTY_DOCUMENT` for `pages == []`. Never larger than
         `MAX_FULL_TEXT_BYTES` when encoded as UTF-8.
     """
-    return "".join(_plan_full_txt(pages)[0])
+    return "".join(_plan_full_txt(pages, site_url)[0])
 
 
-def count_indexed_pages(pages: list[CrawledPage]) -> int:
+def count_indexed_pages(pages: list[CrawledPage], *, site_url: str) -> int:
     """How many links `generate_llms_txt(pages)` lists — `runs.stats["links_emitted"]`.
 
     Shares `_index_entries` with the generator rather than recounting, so this can disagree
@@ -328,10 +334,10 @@ def count_indexed_pages(pages: list[CrawledPage]) -> int:
     property of today's selection rule rather than of the data. Ask the artifact what it
     listed.
     """
-    return len(_index_entries(pages))
+    return len(_index_entries(pages, _origin(site_url)))
 
 
-def count_full_txt_truncations(pages: list[CrawledPage]) -> int:
+def count_full_txt_truncations(pages: list[CrawledPage], *, site_url: str) -> int:
     """How many pages `generate_llms_full_txt(pages)` could not carry in full —
     `runs.stats["full_txt_truncated"]`.
 
@@ -351,10 +357,10 @@ def count_full_txt_truncations(pages: list[CrawledPage]) -> int:
     A page that is both trimmed and then omitted counts once: this is a count of pages missing
     content, not of truncation events. It is `0` on every run whose full text is complete.
     """
-    return _plan_full_txt(pages)[1]
+    return _plan_full_txt(pages, site_url)[1]
 
 
-def _plan_full_txt(pages: list[CrawledPage]) -> tuple[list[str], int]:
+def _plan_full_txt(pages: list[CrawledPage], site_url: str) -> tuple[list[str], int]:
     """Decide the whole of `llms-full.txt`: its chunks in order, and how many pages were cut.
 
     One implementation, two public callers (`generate_llms_full_txt` joins the chunks,
@@ -383,8 +389,8 @@ def _plan_full_txt(pages: list[CrawledPage]) -> tuple[list[str], int]:
     if not pages:
         return [_EMPTY_DOCUMENT], 0
 
-    origin = _origin(pages)
-    entries = _index_entries(pages)
+    origin = _origin(site_url)
+    entries = _index_entries(pages, origin)
     header = f"# {_project_name(pages, origin)}\n\n{_full_summary(len(entries), origin)}\n"
 
     chunks = [header]
@@ -433,7 +439,7 @@ def _truncate(markdown: str) -> tuple[str, bool]:
     return f"{kept}{_PAGE_TRUNCATION_NOTICE}", True
 
 
-def _index_entries(pages: list[CrawledPage]) -> list[_Entry]:
+def _index_entries(pages: list[CrawledPage], origin: str) -> list[_Entry]:
     """Select, label and order the pages both artifacts are built from.
 
     Sorted by URL before anything is derived (the module docstring's determinism contract),
@@ -444,6 +450,28 @@ def _index_entries(pages: list[CrawledPage]) -> list[_Entry]:
     between two pages that share a URL — which `crawl_site` cannot produce, since its frontier
     visits each URL once — but a hand-built list can, and without them a shuffle of such a
     list would change the output and quietly break the one property this module promises.
+
+    ## Three reasons a fetched page is left out
+
+    `is_empty` is the oldest and the one ARCHITECTURE.md §3.4 calls out by name: a bullet
+    naming a URL with no title and no description tells a reader nothing a sitemap would not.
+    The other two are newer and share a justification — **an artifact that claims to index
+    `origin` must not list a page that is not a readable page of `origin`**:
+
+    * **Not a 2xx.** A `404`, `429` or `5xx` response is a real document with a real
+      `<title>`, which is exactly why it has to be excluded explicitly rather than caught by
+      `is_empty`. Left in, a rate-limited page enters the index as `- [Too Many Requests](…)`.
+    * **Not on `origin`.** A page whose final url is another host is a page about another
+      site. Listing it puts a host in the document that the document is not about — the
+      failure that titled Anthropic's artifact `# https://claude.com` (see `_origin`).
+
+    **Both are also enforced upstream, in `internals/crawler.py`, and that is not redundant.**
+    The crawler drops these pages so they never reach `runs.stats["pages_crawled"]` as
+    material for an artifact, and counts each under its own reason so the provenance panel can
+    name it. What is restated here is the *artifact's* own invariant, which has to hold for
+    any `pages` list this module is handed — including the hand-built ones its tests use and
+    any future caller that does not come through `crawl_site`. The seam is not entitled to
+    assume its input was already filtered; that assumption is what `_origin` used to make.
     """
     ordered = sorted(pages, key=_ordering_key)
     entries = [
@@ -455,7 +483,7 @@ def _index_entries(pages: list[CrawledPage]) -> list[_Entry]:
             markdown=page.markdown,
         )
         for page in ordered
-        if not page.is_empty
+        if not page.is_empty and 200 <= page.status < 300 and _page_origin(page.url) == origin
     ]
     entries.sort(key=lambda entry: (_section_rank(entry.section), entry.section))
     return entries
@@ -549,12 +577,30 @@ def _label_for(page: CrawledPage) -> str:
     return _clean(urlsplit(page.url).netloc) or urlsplit(page.url).netloc
 
 
-def _origin(pages: list[CrawledPage]) -> str:
-    """The scheme and host every page in this run shares, taken from the alphabetically first
-    URL. Sorted rather than "the first page in the list" for the module docstring's reason:
-    the list's order is whatever the frontier's races produced."""
-    first = urlsplit(min(page.url for page in pages))
-    return f"{first.scheme}://{first.netloc}"
+def _origin(site_url: str) -> str:
+    """The scheme and host this artifact is about, from the caller's `site_url`.
+
+    **This used to be `min(page.url for page in pages)` — the alphabetically first URL the run
+    fetched — and that is the bug `site_url` was added to the seam to fix.** It rested on
+    "every page in this run shares an origin," which is true of what the crawler REQUESTS and
+    was never true of what it collects: `CrawledPage.url` is the final url after redirects, so
+    a single page answering from another host was enough to rename the whole document. It cost
+    nothing in tests and everything on real sites — one page out of a hundred redirecting to
+    `claude.com` titled Anthropic's artifact `# https://claude.com`, and one CDN asset titled
+    Stripe's `# https://assets.ctfassets.net`, in both cases while the correct root page sat
+    in `pages` with a perfectly good title, skipped because the origin no longer matched it.
+
+    A derived origin can be outvoted by the data it is derived from. A given one cannot.
+    """
+    parts = urlsplit(site_url)
+    return f"{parts.scheme}://{parts.netloc}"
+
+
+def _page_origin(url: str) -> str:
+    """One page's scheme and host, spelled exactly as `_origin` spells the artifact's, so the
+    two can be compared with `==` in `_index_entries`."""
+    parts = urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc}"
 
 
 def _project_name(pages: list[CrawledPage], origin: str) -> str:

@@ -47,7 +47,7 @@ from typing import Any, Final
 
 logger = logging.getLogger(__name__)
 
-RUN_STATS_VERSION: Final = 11
+RUN_STATS_VERSION: Final = 12
 """Which definition of this whole dict's shape a stored row was written under — not just
 `links_emitted`'s meaning, but which KEYS a row of this version even has.
 
@@ -338,6 +338,23 @@ fold has to be order-independent (frontier fetches race under `asyncio.gather`, 
 "whichever page happened to finish first" merge would make this run-level value depend on
 scheduling jitter rather than on the run itself).
 
+**Version 12** rows add two more keys and, unlike version 11, DO redefine one: `links_emitted`
+changes meaning again. `pages_http_error` counts pages whose response was not a 2xx and which
+`internals/blocked.py` did not classify as an access block — an honest `404`, `429` or `5xx`.
+`pages_off_origin` counts pages that were requested on this site and answered by a different
+host, which is to say a cross-origin redirect. `internals/crawler.py` drops both kinds rather
+than collecting them, so they are excluded from `pages_crawled` as well as from the index.
+
+**Why they had to become their own keys rather than being folded into `pages_empty_content`.**
+The provenance panel draws the gap between what a run fetched and what its index lists as a
+set of named reasons, and a reason it cannot name is silently attributed to whichever one it
+can. That is the identical failure version 11 was written to stop: before it, a Cloudflare
+challenge page was reported to the user as "no extractable content," which was not merely
+imprecise but false. A `404` reported the same way would be false in the same way — the
+crawler extracted the error page's content perfectly well; it was simply not a page of this
+site. Every reason a fetched page fails to reach the index now has a counter of its own, and
+`pages_crawled - links_emitted` is fully explained by their sum.
+
 **Unlike every one of this file's ten earlier bumps, this one adds NO new keyword argument to
 `build_run_stats` at all.** `pages_blocked` and `blocked_reason` are computed entirely inside
 the crawl loop — `internals/crawler.py`'s `_note_block`, called on the seed and on every
@@ -431,7 +448,8 @@ def build_run_stats(
 
     Args:
         crawl_stats: `CrawlResult.stats` — `pages_crawled`, `pages_failed`, `bytes_fetched`,
-            `duration_ms`, `cap_hit`, `pages_empty_content`, `pages_blocked`, and
+            `duration_ms`, `cap_hit`, `pages_empty_content`, `pages_blocked`,
+            `pages_http_error`, `pages_off_origin`, and
             `blocked_reason` (the last two, `RUN_STATS_VERSION` 11). Passed through unchanged
             and unre-derived: in particular, `cap_hit` is never recomputed here, and neither
             `pages_blocked` nor `blocked_reason` is — the crawl loop is the only code that

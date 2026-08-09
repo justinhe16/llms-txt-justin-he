@@ -18,6 +18,7 @@ from app.features.crawl.internals.crawler import (
     AccessBlockedError,
     CrawlLimits,
     RobotsDisallowedError,
+    SeedHttpError,
     crawl_site,
 )
 from app.features.crawl.internals.fetcher import ByteBudget, PolitenessGate
@@ -936,3 +937,123 @@ async def test_widening_a_gate_between_phases_applies_to_the_frontier() -> None:
     frontier_starts = start_times[1:]
     assert len(frontier_starts) == 2
     assert frontier_starts[1] - frontier_starts[0] >= 0.045
+
+
+# --- Non-2xx responses and cross-origin redirects -----------------------------------------
+#
+# The complement of the block tests above: `internals/blocked.py` deliberately declines to
+# call a 404, a 429, or an ordinary 5xx an access block, and before `SeedHttpError` every one
+# of them reached `generate_llms_txt` as an ordinary page.
+
+
+async def test_a_non_2xx_seed_fails_the_run_with_its_status() -> None:
+    """[Seed, not a block]. `classify_block` returns `None` for a `404`, so nothing upstream
+    stops it — the response is real HTML with a real `<title>`, and a run whose seed 404'd
+    used to publish an artifact headed `# 404 Not Found` and record itself `completed`."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, html="<html><head><title>404 Not Found</title></head></html>")
+
+    async with _client(handler) as client:
+        result = await crawl_site(
+            client, "http://seed.test/", limits=_limits(), resolver=_fake_resolver()
+        )
+
+    assert isinstance(result.seed_error, SeedHttpError)
+    assert result.seed_error.status == 404
+    assert result.pages == []
+    assert result.stats["pages_http_error"] == 1
+    assert result.seed_origin is None
+
+
+async def test_a_non_2xx_frontier_page_is_counted_and_dropped_without_failing_the_run() -> None:
+    """[Non-seed, not a block]. Mirrors the blocked-frontier case exactly: counted, excluded,
+    and not a failure. One rate-limited page out of two does not make a run a failure."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "limited" in _host(request):
+            return httpx.Response(429, html="<html><head><title>Too Many Requests</title></head>")
+        return httpx.Response(200, text="ok")
+
+    async with _client(handler) as client:
+        result = await crawl_site(
+            client,
+            "http://seed.test/",
+            limits=_limits(),
+            extra_urls=["http://limited.test/", "http://ok.test/"],
+            resolver=_fake_resolver(),
+        )
+
+    assert result.seed_error is None
+    assert result.cap_hit is None
+    assert sorted(page.url for page in result.pages) == ["http://ok.test/", "http://seed.test/"]
+    assert result.stats["pages_http_error"] == 1
+    assert result.stats["pages_failed"] == 0
+
+
+async def test_a_frontier_page_that_redirects_to_another_host_is_counted_and_dropped() -> None:
+    """A same-origin request answered by a different host. This is the ONLY way an off-origin
+    page reaches the loop — `url_ranking.select_urls` drops off-origin candidates before any
+    request is made — and it is how `assets.ctfassets.net` got into stripe.com's artifact."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "cdn" in _host(request):
+            return httpx.Response(200, text="asset")
+        if "asset" in str(request.url):
+            return httpx.Response(302, headers={"Location": "http://cdn.test/file"})
+        return httpx.Response(200, text="ok")
+
+    async with _client(handler) as client:
+        result = await crawl_site(
+            client,
+            "http://seed.test/",
+            limits=_limits(),
+            extra_urls=["http://seed.test/asset", "http://seed.test/ok"],
+            resolver=_fake_resolver(),
+        )
+
+    assert result.seed_error is None
+    assert [page.url for page in result.pages] == ["http://seed.test/", "http://seed.test/ok"]
+    assert result.stats["pages_off_origin"] == 1
+
+
+async def test_the_frontier_is_not_re_filtered_by_origin_only_redirects_are() -> None:
+    """The rule is about where a fetch LANDED, never about which URLs the caller chose:
+    `crawl_site`'s frontier is a parameter it does not second-guess (module docstring), and
+    origin filtering of candidates belongs to `url_ranking.select_urls` one layer up. A
+    caller that deliberately hands this function another host still gets that page."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="ok")
+
+    async with _client(handler) as client:
+        result = await crawl_site(
+            client,
+            "http://seed.test/",
+            limits=_limits(),
+            extra_urls=["http://other.test/"],
+            resolver=_fake_resolver(),
+        )
+
+    assert sorted(page.url for page in result.pages) == ["http://other.test/", "http://seed.test/"]
+    assert result.stats["pages_off_origin"] == 0
+
+
+async def test_seed_origin_follows_a_whole_site_redirect() -> None:
+    """A site that has moved hosts is crawled — and described — at the host it moved to. This
+    is why the artifact's origin comes from the seed's LANDING url rather than the registered
+    one, and why the seed itself is exempt from the off-origin rule."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "old" in _host(request):
+            return httpx.Response(301, headers={"Location": "http://new.test/"})
+        return httpx.Response(200, text="ok")
+
+    async with _client(handler) as client:
+        result = await crawl_site(
+            client, "http://old.test/", limits=_limits(), resolver=_fake_resolver()
+        )
+
+    assert result.seed_error is None
+    assert result.seed_origin == "http://new.test"
+    assert [page.url for page in result.pages] == ["http://new.test/"]

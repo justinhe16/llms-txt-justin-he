@@ -25,8 +25,13 @@ def test_run_stats_version_is_pinned() -> None:
     CONFIGURED ceiling rather than something the run measured. This repo's own WAF-detection
     ticket bumped it a sixth time, from 10 to 11, when `pages_blocked` and `blocked_reason`
     joined the shape — how many of a run's fetched pages, seed included, came back as a
-    detected WAF/CDN challenge or an outright denial, and which kind. See `RUN_STATS_VERSION`'s
-    own docstring for the full history, including why every one of those eleven keys is a
+    detected WAF/CDN challenge or an outright denial, and which kind. A seventh bump, from 11
+    to 12, added `pages_http_error` and `pages_off_origin` and redefined `links_emitted` with
+    them: the two remaining reasons a fetched page never reaches the index — a non-2xx
+    response `classify_block` declines to call a block, and a cross-origin redirect — so that
+    `pages_crawled - links_emitted` is fully explained by named reasons rather than partly
+    attributed to whichever reason the panel happens to know. See `RUN_STATS_VERSION`'s
+    own docstring for the full history, including why every one of those keys is a
     real, recorded value on every row from the version that added it onward —
     `llms_txt_bytes: 0`, `index_diff: None`, `enrich_unavailable_reason: None`, `dropped: {}`,
     `max_pages` set to the run's own configured budget, `pages_blocked: 0`, and
@@ -36,7 +41,7 @@ def test_run_stats_version_is_pinned() -> None:
     deliberately rather than by accident: `tests/test_run_persistence.py` only checks the
     version NUMBER a live row lands with, which would pass just as happily against a
     `RUN_STATS_VERSION` that was bumped again without anyone noticing this test existed."""
-    assert RUN_STATS_VERSION == 11
+    assert RUN_STATS_VERSION == 12
 
 
 def test_build_run_stats_passes_crawl_stats_through_unchanged_and_adds_twenty_keys() -> None:

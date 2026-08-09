@@ -399,6 +399,8 @@ export const PROVENANCE_SEGMENTS = {
   notAttempted: "Not attempted",
   listed: "Listed in llms.txt",
   omittedEmpty: "Omitted as empty",
+  omittedHttpError: "Omitted: not a page",
+  omittedOffOrigin: "Omitted: another site",
 } as const;
 
 /**

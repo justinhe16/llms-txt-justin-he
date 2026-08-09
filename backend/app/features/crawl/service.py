@@ -112,6 +112,7 @@ from app.features.crawl.internals.crawler import (
     CrawlLimits,
     CrawlResult,
     RobotsDisallowedError,
+    SeedHttpError,
     crawl_site,
 )
 from app.features.crawl.internals.enrich import apply_summaries, enrich_pages
@@ -283,21 +284,27 @@ def _is_retryable(exc: Exception) -> bool:
     every bug in the crawl path becoming a five-minute-slow bug.
 
     **A 4xx or 5xx from the target site is still not on either list for its own sake, because
-    it is still not an exception here at all — with exactly one, narrow carve-out.**
-    `internals/fetcher.py` returns a `CrawledPage` carrying `status` rather than raising for a
-    non-2xx response, so an ordinary "404 on the seed URL" or "500 from the target site"
-    still reaches this service as a *successful* crawl of a page, and turning those into
-    failures in general remains an undesigned crawler-pipeline decision (CLAUDE.md #9,
-    ARCHITECTURE.md §3.4). The one status-derived exception that DOES now exist,
-    `AccessBlockedError` above, is deliberately not that general decision: it is raised only
-    for the narrow, specifically-classified subset of responses `internals/blocked.py`'s
-    `classify_block` recognizes as a detected WAF/CDN challenge or denial — never for an
-    ordinary 4xx/5xx `classify_block` declines to classify — and only ever for the SEED;
-    `internals/crawler.py`'s frontier loop counts a blocked FRONTIER page and keeps going,
-    never raising anything for it. A future ticket that wants to fail runs on ordinary 404s
-    or 500s still has that whole decision ahead of it; this one answers a narrower question
-    that was never "should a bad status code fail a run" in general.
+    it is an exception here now, and it is the one entry on this list whose answer depends on
+    a VALUE rather than only on a type.** Two exceptions divide that space between them, and
+    neither is a general "a bad status fails a run" rule applied blindly:
+
+    * `AccessBlockedError` — the narrow, specifically-classified subset
+      `internals/blocked.py`'s `classify_block` recognizes as a WAF/CDN challenge or denial.
+      Permanent, by not appearing below: a challenge is deterministic for a non-browser
+      client and carries no `Retry-After`, so a second attempt buys nothing.
+    * `SeedHttpError` — every other non-2xx seed response, the ones `classify_block`
+      deliberately declines to call a block. **This one splits**, which is why it is handled
+      by an explicit branch below rather than by membership in `_RETRYABLE_EXCEPTIONS`: a
+      `503` or a `429` is a site that may well answer differently in five minutes, and a
+      `404` is a site that will not. Matching on the type alone would have to pick one answer
+      for both, and either choice is wrong half the time.
+
+    Both are SEED-only. `internals/crawler.py`'s frontier loop counts a blocked or non-2xx
+    FRONTIER page and keeps going, never raising for it — one missing page out of a hundred
+    does not make a run a failure.
     """
+    if isinstance(exc, SeedHttpError):
+        return exc.status >= 500 or exc.status == 429
     return isinstance(exc, _RETRYABLE_EXCEPTIONS)
 
 
@@ -316,6 +323,32 @@ def _attempt_message(message: str, attempts: int) -> str:
     if attempts <= 1:
         return message[:_MAX_ERROR_LENGTH]
     return f"Failed after {attempts} attempts: {message}"[:_MAX_ERROR_LENGTH]
+
+
+def _seed_http_message(status: int) -> str:
+    """What `runs.error` says when the seed answered with `status` and
+    `internals/blocked.py` did not call it an access block.
+
+    Four branches rather than one templated sentence, because the four statuses ask the user
+    for four different things — check the URL, wait, do nothing, do nothing yet — and a single
+    "the site returned HTTP {status}" would make every one of them the user's problem to
+    diagnose. `401`/`403` never reach here: `classify_block` claims both unconditionally
+    (`_DENIED_STATUSES`), so they get `_BLOCKED_MESSAGES`' allowlisting advice instead.
+    """
+    if status == 404:
+        return (
+            "That URL was not found on this site (HTTP 404). Check that it is spelled "
+            "correctly and points at a page that exists."
+        )
+    if status == 429:
+        return (
+            "This site asked this crawler to slow down (HTTP 429). This run will be retried; "
+            "if it keeps happening, the site is rate-limiting more aggressively than this "
+            "crawler's politeness delay accounts for."
+        )
+    if status >= 500:
+        return f"This site returned a server error (HTTP {status}). This run will be retried."
+    return f"This site did not return a usable page (HTTP {status})."
 
 
 def _safe_error_message(exc: Exception) -> str:
@@ -347,6 +380,13 @@ def _safe_error_message(exc: Exception) -> str:
         # fixed strings in `_BLOCKED_MESSAGES` are written for a signed-in user to read, and
         # `AccessBlockedError.__str__` is written for a developer reading `fly logs`.
         message = _BLOCKED_MESSAGES[exc.reason]
+    elif isinstance(exc, SeedHttpError):
+        # `.status` is a fact about the user's OWN site, which they can reproduce with one
+        # `curl` — the same reasoning that makes `SsrfBlockedError`'s message safe verbatim.
+        # Nothing about this process leaks through an integer. Phrased so the number is
+        # actionable rather than decorative: a 404 means fix the URL, a 429 means wait, a 5xx
+        # means the site is unwell and the run will be retried.
+        message = _seed_http_message(exc.status)
     elif isinstance(exc, httpx.TimeoutException | TimeoutError):
         # Both spellings, because two different layers time a crawl out and they do not
         # share a base class: httpx raises `httpx.TimeoutException` when one request exceeds
@@ -704,6 +744,15 @@ class CrawlService:
                         result.seed_error.reason,
                         extra={"url": website.url, "blocked_reason": result.seed_error.reason},
                     )
+                elif isinstance(result.seed_error, SeedHttpError):
+                    # No `exc_info`, for the same reason the two branches above omit it: a
+                    # site answering `404` is not a traceback, it is an answer. The status is
+                    # the whole story and it is already in `extra`.
+                    logger.warning(
+                        "crawl: seed URL returned HTTP %d; not crawling",
+                        result.seed_error.status,
+                        extra={"url": website.url, "status": result.seed_error.status},
+                    )
                 else:
                     logger.warning(
                         "crawl: could not fetch its seed URL (%s)",
@@ -739,6 +788,21 @@ class CrawlService:
                     ),
                 )
             else:
+                # WHICH ORIGIN THE ARTIFACTS CLAIM TO DESCRIBE.
+                #
+                # `result.seed_origin` is where the seed's fetch actually LANDED, after every
+                # redirect; `website.url` is what the user registered. They agree for almost
+                # every site, and where they disagree the seed's answer is the honest one: a
+                # site that now redirects wholesale to another host has all of its pages on
+                # that host, so an artifact titled with the old one would name a host that
+                # appears nowhere in the document.
+                #
+                # `website.url` remains the fallback for the case `seed_origin` is `None`,
+                # which is every seed failure — a path this branch is the `else` of, so the
+                # fallback is unreachable here in practice and present because a `str | None`
+                # that is never `None` at one call site is still a `str | None`.
+                artifact_site_url = result.seed_origin or website.url
+
                 # ENRICHMENT, FIRST THING IN THIS BRANCH, BEFORE `generate_llms_txt`. This is
                 # the only place it can sit: `generate_llms_txt`/`generate_llms_full_txt` read
                 # `title`/`description` straight off each `CrawledPage` (`internals/llms_txt.py`),
@@ -830,7 +894,10 @@ class CrawlService:
                 # Reads `artifact_pages`, not `result.pages` — see the enrichment comment
                 # above for why the two can differ, and `serialize_payload` a few lines down
                 # for why the PAYLOAD deliberately does not follow this same substitution.
-                llms_txt = generate_llms_txt(artifact_pages)
+                # `site_url` is the origin both artifacts are ABOUT, and all four calls get
+                # the same one — see the `artifact_site_url` assignment above for why it
+                # prefers the seed's landing origin over the registered URL.
+                llms_txt = generate_llms_txt(artifact_pages, site_url=artifact_site_url)
 
                 # THE DIFF READ. No transaction is open here, and none may be opened around
                 # it — see the module docstring's "PER-193 added a FOURTH call" paragraph.
@@ -855,9 +922,11 @@ class CrawlService:
                     enrich_applied=enrich_applied,
                 )
 
-                llms_full_txt = generate_llms_full_txt(artifact_pages)
-                links_emitted = count_indexed_pages(artifact_pages)
-                full_txt_truncated = count_full_txt_truncations(artifact_pages)
+                llms_full_txt = generate_llms_full_txt(artifact_pages, site_url=artifact_site_url)
+                links_emitted = count_indexed_pages(artifact_pages, site_url=artifact_site_url)
+                full_txt_truncated = count_full_txt_truncations(
+                    artifact_pages, site_url=artifact_site_url
+                )
 
                 # `result.pages` — the ORIGINAL, extracted pages, never `artifact_pages` — is
                 # deliberate and asymmetric with the four calls just above it. The payload is

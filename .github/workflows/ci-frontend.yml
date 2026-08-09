@@ -85,6 +85,12 @@ jobs:
       - name: tsc --noEmit
         run: npm run typecheck
 
+      # Unit tests for the pure logic under lib/ — comparators, status mappings, funnel
+      # arithmetic, URL validation. Before `next build`, because it is the faster of the two
+      # and a broken comparator should not wait on a webpack compile to report itself.
+      - name: vitest
+        run: npm test
+
       - name: next build
         run: npm run build
 

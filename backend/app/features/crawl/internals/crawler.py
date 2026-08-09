@@ -62,6 +62,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -78,6 +79,19 @@ from app.features.crawl.schemas import CrawledPage
 
 
 logger = logging.getLogger(__name__)
+
+
+def _origin_of(url: str) -> str:
+    """`url`'s scheme and host, lowercased — the comparison `_same_origin_as_seed` makes.
+
+    Deliberately simpler than `internals/url_ranking.py`'s `_origin`, which collapses default
+    ports because it compares URLs a sitemap wrote by hand against a seed a user typed. Both
+    sides here are a `CrawledPage.url`, which `internals/fetcher.py` built from an already
+    normalized, already validated target, so the two spellings this would have to reconcile
+    cannot both occur in one run.
+    """
+    parts = urlsplit(url)
+    return f"{parts.scheme.lower()}://{parts.netloc.lower()}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,6 +203,24 @@ class CrawlResult:
     build an artifact from. `CrawlService.execute_run` maps this to a sanitized message; it
     is never shown to a caller as-is."""
 
+    seed_origin: str | None = None
+    """The scheme and host the seed's fetch actually landed on, after every redirect — the
+    origin this run is *about*, and the one `app.features.crawl.service` hands
+    `generate_llms_txt` as `site_url`.
+
+    **The seed's FINAL origin, not the URL the website was registered with**, and the two
+    differ in exactly one interesting case: a site that has moved hosts. Registering
+    `example.com` after it began redirecting wholesale to `example.net` should produce an
+    artifact about `example.net`, because that is where every page in it came from — titling
+    it `example.com` would name a host that appears nowhere in the document. The registered
+    URL stays the fallback in `service.py` for the one case this is `None`.
+
+    `None` when the seed never landed — any `seed_error` at all, a blocked or non-2xx seed
+    included. There are no pages in that case either, so nothing downstream needs it.
+    Defaulted rather than required so the handful of tests that build a `CrawlResult` by hand
+    keep working unchanged.
+    """
+
 
 class RobotsDisallowedError(Exception):
     """Raised (as `CrawlResult.seed_error`) when the run's own `is_allowed` predicate refuses
@@ -259,6 +291,42 @@ class AccessBlockedError(Exception):
         response — `"challenge"` or `"denied"`. Read by `_safe_error_message`
         (`app.features.crawl.service`) to pick which of the two fixed, safe-to-display
         strings `runs.error` gets."""
+
+
+class SeedHttpError(Exception):
+    """Raised (as `CrawlResult.seed_error`) when the SEED's final response is not 2xx and
+    `internals/blocked.py`'s `classify_block` did NOT recognise it as an access block.
+
+    **This is the complement of `AccessBlockedError`, not an overlap with it.**
+    `classify_block` answers one narrow question — "is this a WAF or CDN refusing this
+    crawler?" — and deliberately answers `None` for a `404`, a `429`, and an ordinary `5xx`,
+    because those are a site answering honestly rather than denying access (see that module's
+    numbered rules). Honest or not, none of them is the page that was asked for, and every one
+    of them used to reach `generate_llms_txt` as an ordinary `CrawledPage`: a `404` page has a
+    real `<title>`, so a run whose seed 404'd published an artifact headed `# 404 Not Found`
+    and recorded itself `completed`. The two exceptions together are what close that gap —
+    this one owns every non-2xx response `classify_block` passes over.
+
+    **Retry classification lives with the status, and splits.** Unlike every other seed error
+    in this module, this one is retryable for SOME values and permanent for others, so
+    `_is_retryable` (`app.features.crawl.service`) reads `.status` rather than matching the
+    type alone: `5xx` and `429` are a site that may well answer differently in five minutes,
+    while a `404` will still be a `404` on the third attempt. That split is exactly the one
+    `service.py`'s own retry docstring described as deferred until the crawl pipeline was
+    designed.
+
+    **Known limitation, identical to `AccessBlockedError`'s and stated for the same reason:**
+    this reads the FINAL response after `fetch_page`'s own redirect handling, so a seed that
+    redirects into a soft `404` is caught here exactly as reliably as one that serves it
+    directly.
+    """
+
+    def __init__(self, status: int, url: str) -> None:
+        super().__init__(f"seed returned HTTP {status}: {url}")
+        self.status = status
+        """The final response's HTTP status code. Read by `_safe_error_message` to pick the
+        message `runs.error` gets, and by `_is_retryable` to decide whether this attempt
+        earns another — both in `app.features.crawl.service`."""
 
 
 async def crawl_site(
@@ -399,6 +467,9 @@ async def crawl_site(
     pages_failed = 0
     pages_blocked = 0
     blocked_reason: BlockReason | None = None
+    pages_http_error = 0
+    pages_off_origin = 0
+    seed_origin: str | None = None
     cap_hit: str | None = None
     seed_error: Exception | None = None
 
@@ -451,6 +522,54 @@ async def crawl_site(
         pages_blocked += 1
         blocked_reason = merge_block_reason(blocked_reason, reason)
 
+    def _note_http_error() -> None:
+        """Record one frontier page dropped for a non-2xx status. Unguarded for the same
+        reason `_note_block` is: incrementing a counter needs no coordination between two
+        concurrent frontier tasks."""
+        nonlocal pages_http_error
+        pages_http_error += 1
+
+    def _note_off_origin() -> None:
+        """Record one frontier page dropped for landing on another host. Unguarded, as
+        `_note_http_error` above."""
+        nonlocal pages_off_origin
+        pages_off_origin += 1
+
+    def _is_ok(page: CrawledPage) -> bool:
+        """Whether `page`'s final response was a 2xx — the one status test this loop makes.
+
+        Spelled the same way `internals/sitemap.py` already spells it for the `robots.txt` and
+        sitemap fetches it makes, so "a usable response" means one thing across the feature.
+        Every non-2xx that reaches here has already been past `classify_block`
+        (`internals/fetcher.py` calls it on every response), so anything this returns `False`
+        for is by construction a status that module declined to call an access block.
+        """
+        return 200 <= page.status < 300
+
+    def _redirected_off_origin(requested_url: str, page: CrawledPage) -> bool:
+        """Whether fetching `requested_url` ended up on a different host than it asked for.
+
+        **Compares the page against the URL THAT WAS REQUESTED, never against the seed**, and
+        that distinction is the whole reason this is safe to do here. `crawl_site` does not
+        get to second-guess which URLs its caller put in the frontier — "the frontier is a
+        parameter, not something this module discovers" (module docstring), and origin
+        filtering of *candidates* is `internals/url_ranking.py`'s `"off_origin"` rule, one
+        layer up. What this notices is different and strictly local: a URL that was asked for
+        and answered by somebody else. The caller's choice is respected; only the redirect is
+        judged.
+
+        That is also exactly the shape of the bug it exists for. Every off-origin page
+        observed in a real run arrived this way — a `stripe.com` URL answering from
+        `assets.ctfassets.net`, an `anthropic.com` URL answering from `claude.com` — because
+        the frontier reaching this loop was already same-origin by construction. A page that
+        moved hosts mid-fetch is a page about a different site, and listing it in this site's
+        `llms.txt` puts a host in the document that the document is not about.
+
+        The SEED is deliberately not subject to this: a site that has moved wholesale should
+        be crawled where it moved to, which is what `seed_origin` records.
+        """
+        return _origin_of(page.url) != _origin_of(requested_url)
+
     async def fetch_frontier_url(url: str) -> None:
         nonlocal pages_failed
         async with semaphore:
@@ -486,6 +605,20 @@ async def crawl_site(
                 # invariant rather than widening `_note_block`'s own signature to `str`.
                 _note_block(cast(BlockReason, page.blocked_reason))
                 return
+            # Counted and dropped, exactly as a blocked page is, and for the same reason: an
+            # honest `404`, `429` or `5xx` is a completed request that did not return the page
+            # it asked for, so it is neither a fetch FAILURE nor something this run's artifact
+            # should list. Never fails the run — one missing page out of a hundred is an
+            # ordinary fact about crawling the internet, and only the SEED's status can end a
+            # run (see `SeedHttpError`).
+            if not _is_ok(page):
+                _note_http_error()
+                return
+            # Same treatment, one rule later — see `_redirected_off_origin` for why this
+            # compares against the requested URL rather than against the seed.
+            if _redirected_off_origin(url, page):
+                _note_off_origin()
+                return
             pages.append(page)
 
     try:
@@ -513,7 +646,21 @@ async def crawl_site(
                         reason = cast(BlockReason, seed_page.blocked_reason)
                         _note_block(reason)
                         seed_error = AccessBlockedError(reason, seed_url)
+                    elif not _is_ok(seed_page):
+                        # Sits exactly where the block branch above sits, and for the same
+                        # reason: BEFORE `pages.append`, so a seed that answered with a `404`
+                        # or a `503` never becomes a page an artifact can be built from.
+                        # `frontier_from_seed` is never reached either — this is still the
+                        # seed fetch's own `else`, so there is no seed page to derive a
+                        # fallback frontier from. Counted as well as raised, so a failed run's
+                        # partial stats say what happened rather than only `runs.error` does.
+                        _note_http_error()
+                        seed_error = SeedHttpError(seed_page.status, seed_url)
                     else:
+                        # The seed defines the origin every frontier page is measured against
+                        # (`_same_origin_as_seed`). Set from the seed's FINAL url, so a site
+                        # that moved hosts wholesale is crawled at the host it moved to.
+                        seed_origin = _origin_of(seed_page.url)
                         pages.append(seed_page)
 
                         # The frontier, from whichever of the two sources supplied one. The
@@ -585,5 +732,18 @@ async def crawl_site(
         # this dict.
         "pages_blocked": pages_blocked,
         "blocked_reason": blocked_reason,
+        # The two exclusions this loop makes that are neither a cap, a failure, nor a block.
+        # Recorded for the reason `pages_empty_content` is: the provenance panel draws the
+        # gap between `pages_crawled` and `links_emitted` as a set of named reasons, and a
+        # reason it cannot name gets silently attributed to whichever one it can — the exact
+        # misreport `pages_blocked` was added to stop making.
+        "pages_http_error": pages_http_error,
+        "pages_off_origin": pages_off_origin,
     }
-    return CrawlResult(pages=pages, stats=stats, cap_hit=cap_hit, seed_error=seed_error)
+    return CrawlResult(
+        pages=pages,
+        stats=stats,
+        cap_hit=cap_hit,
+        seed_error=seed_error,
+        seed_origin=seed_origin,
+    )

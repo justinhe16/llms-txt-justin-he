@@ -5,6 +5,15 @@ registers a **website** by domain, the backend crawls it as a **run**, and each 
 `llms.txt` artifact describing the site in the form large language models can consume. Runs are
 kept, so a website accumulates a history.
 
+| | |
+| --- | --- |
+| **Live app** | **https://llms-text-justin-he-gamma.vercel.app** |
+| API | https://llms-text-justin-he.fly.dev · [`/docs`](https://llms-text-justin-he.fly.dev/docs) · [`/health`](https://llms-text-justin-he.fly.dev/health) |
+| Source | https://github.com/justinhe16/llms-txt-justin-he |
+
+Sign in with GitHub, paste a URL, and the first run starts immediately. The Fly app and the
+Vercel project keep their original `llms-text` hostnames — see "Infrastructure" below.
+
 Next.js App Router on Vercel · FastAPI + an ARQ worker on Fly.io (one image, two processes) ·
 Supabase for Postgres, Auth and Storage · Prisma for schema and migrations only, asyncpg at
 runtime.
@@ -13,6 +22,17 @@ runtime.
 authorization model, transaction boundaries, migration and deploy policy, secrets hygiene. It is
 the authority on all of it, and this file does not restate it.
 [`CLAUDE.md`](./CLAUDE.md) is the short list of rules that are expensive to get wrong.
+
+---
+
+## Screenshots
+
+| | |
+| --- | --- |
+| ![Landing page](./docs/screenshots/01-landing.png) | ![The crawls table](./docs/screenshots/02-crawls.png) |
+| Paste a URL and the first run starts. | Every registered site, with its latest run. |
+| ![The Output tab](./docs/screenshots/03-output.png) | ![The Trends tab](./docs/screenshots/04-trends.png) |
+| The generated `llms.txt`, with `llms-full.txt` beside it. | What changed between runs, and how each run was built. |
 
 ---
 
@@ -157,13 +177,21 @@ that both workflows run before trusting it.
 `main` also requires linear history, so merge with `gh pr merge <n> --squash`, never a merge
 commit.
 
-The frontend job ends with a rendered-output smoke test, because `tsc`, eslint and `next build`
-all pass on a page that renders wrong. It loads the built page in headless Chrome and measures
-what the browser actually resolved:
+The frontend is checked at three levels, because each one passes on failures the others catch.
+`tsc` and eslint prove the types and the style line up. **Vitest** covers the pure logic under
+`frontend/lib/` — comparators, status mappings, provenance arithmetic, URL validation — in a
+node environment with no jsdom and no React, so it stays a unit-test suite rather than drifting
+into a second end-to-end one. And a **rendered-output smoke test** loads the built page in
+headless Chrome and measures what the browser actually resolved, because `tsc`, eslint and
+`next build` all pass on a page that renders wrong:
 
 ```bash
-cd frontend && npm run build && npm run smoke
+cd frontend && npm test                       # vitest, pure logic under lib/
+cd frontend && npm run build && npm run smoke # headless Chrome, computed styles
 ```
+
+`make test` runs the vitest suite alongside the backend's pytest suite; the smoke test needs a
+build first and so belongs to CI and to the command above.
 
 ---
 

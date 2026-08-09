@@ -87,7 +87,22 @@ export type SelectionState =
  * the gate is `run.status === "completed"` rather than "does `stats.links_emitted` exist." */
 export type IndexState =
   | { kind: "not_stored" }
-  | { kind: "stored"; indexed: number; omittedEmpty: number };
+  | {
+      kind: "stored";
+      indexed: number;
+      omittedEmpty: number;
+      /** `stats.pages_http_error` (`RUN_STATS_VERSION` 12) — fetched pages whose response was
+       * not a 2xx and which `internals/blocked.py` did not classify as an access block: an
+       * honest `404`, `429`, or `5xx`. `0` on rows written before version 12, which is
+       * indistinguishable from "none happened" and is the right reading either way: those
+       * runs collected such pages into the index instead of excluding them, so there is no
+       * exclusion to report. */
+      omittedHttpError: number;
+      /** `stats.pages_off_origin` (`RUN_STATS_VERSION` 12) — fetched pages that were requested
+       * on this site and answered by a different host. `0` on pre-version-12 rows, read the
+       * same way as `omittedHttpError`. */
+      omittedOffOrigin: number;
+    };
 
 /**
  * The page budget this run ran under — `stats.max_pages`, and what ranking was therefore
@@ -328,10 +343,17 @@ export function selectionSelected(selection: SelectionState): number | null {
  *   (a): the seed has to be its own visible term in the funnel, or "selected -> fetched" reads
  *   as broken arithmetic. `frontierFetched` below is `pagesCrawled - 1` for exactly this
  *   reason — it excludes the seed so the comparison against `urlsSelected` is honest.
- * * `indexed + omittedEmpty === pagesCrawled` happens to hold today (every fetched page is
- *   either indexed or empty), but this module renders both as independent recorded facts —
- *   `stats.links_emitted` and `stats.pages_empty_content` — rather than deriving one from the
- *   other, matching `links_emitted`'s own docstring: "ask the artifact what it listed; do not
+ * * `indexed + omittedEmpty + omittedHttpError + omittedOffOrigin === pagesCrawled` is the
+ *   version-12 form of an invariant that used to have two terms. It gained the other two when
+ *   the crawler began excluding non-2xx responses and cross-origin redirects from the index
+ *   (`RUN_STATS_VERSION` 12): with only `omittedEmpty` to spend it on, the whole
+ *   `pagesCrawled - indexed` gap was implicitly attributed to empty content, so a run that
+ *   dropped four rate-limited pages reported four pages with "no extractable content" — the
+ *   same false claim version 11 was written to stop making about blocked pages. Every term is
+ *   an independently recorded fact —
+ *   `stats.links_emitted`, `stats.pages_empty_content`, `stats.pages_http_error` and
+ *   `stats.pages_off_origin` — rather than one derived from the others, matching
+ *   `links_emitted`'s own docstring: "ask the artifact what it listed; do not
  *   reconstruct it."
  *
  * ## Fetch
@@ -423,6 +445,8 @@ export function runProvenance(run: Pick<RunDetail, "status" | "stats">): RunProv
           kind: "stored",
           indexed: finiteNumber(stats.links_emitted) ?? 0,
           omittedEmpty: finiteNumber(stats.pages_empty_content) ?? 0,
+          omittedHttpError: finiteNumber(stats.pages_http_error) ?? 0,
+          omittedOffOrigin: finiteNumber(stats.pages_off_origin) ?? 0,
         };
 
   return {
