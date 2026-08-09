@@ -337,7 +337,7 @@ function funnelStages(provenance: RunProvenance, status: RunDetail["status"]): F
       note:
         status === "failed"
           ? "This run failed before fetching finished."
-          : fetchCapNote(fetch.capHit, provenance.overLimit),
+          : fetchCapNote(fetch.capHit, provenance.overLimit, fetch.failed),
       detail: null,
     },
     {

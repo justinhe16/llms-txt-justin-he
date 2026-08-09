@@ -245,13 +245,32 @@ export function capHitCopy(capHit: string | null): string {
  * split) falls through to `capHitCopy` unchanged rather than guessing — a version-9-or-earlier
  * row genuinely does not record which rule dropped what.
  *
+ * `failed` is taken as well, because a budget that was spent and a page that failed are
+ * independent facts and the sentence has to be true of both — see the comment on the branch
+ * itself.
+ *
  * Still bound by ARCHITECTURE.md §3.4: the budget being spent is a SUCCESS. "Reached", never
  * "cut off", "stopped short" or "hit its limit" — and the sentence leads with the pages that
  * were fetched rather than the ones that were not.
  */
-export function fetchCapNote(capHit: string | null, overLimit: number | null): string {
+export function fetchCapNote(
+  capHit: string | null,
+  overLimit: number | null,
+  failed: number
+): string {
   if (capHit === null && overLimit !== null && overLimit > 0) {
-    return `Every page this run selected was fetched. Its page budget was reached at selection rather than here — ${overLimit.toLocaleString()} ranked ${overLimit === 1 ? "URL" : "URLs"} did not fit into the frontier, so the fetch loop never had a cap left to reach.`;
+    const budget = `This run's page budget was reached at selection rather than here — ${overLimit.toLocaleString()} ranked ${overLimit === 1 ? "URL" : "URLs"} did not fit into the frontier, so the fetch loop never had a cap left to reach.`;
+    // `failed` is why this is not one sentence. `pages_failed` is incremented by
+    // `fetch_frontier_url`'s own `except Exception` (`internals/crawler.py`) and has nothing
+    // to do with any cap — a frontier URL can fail on a network error, a non-2xx, or an SSRF
+    // refusal on a run that tripped nothing. And on a `cap_hit: null` run it is the ONLY way a
+    // selected URL goes unfetched: no task short-circuited on the `cap_hit is not None` guard,
+    // so every one of them was attempted and `frontierFetched + failed === urlsSelected`
+    // exactly. Leading with "every page this run selected was fetched" there would put a false
+    // claim directly beside the `Failed` legend entry counting the ones that were not — the
+    // same shape of contradiction this whole function exists to remove, reintroduced one state
+    // over.
+    return failed > 0 ? budget : `Every page this run selected was fetched. ${budget}`;
   }
   return capHitCopy(capHit);
 }
