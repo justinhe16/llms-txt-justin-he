@@ -31,6 +31,12 @@ from app.features.crawl.internals.llms_txt import (
 from app.features.crawl.schemas import CrawledPage
 
 
+_SITE = "https://example.test"
+"""The registered site every page in this module's fixtures belongs to — the `site_url`
+both artifacts are built for. One constant rather than a literal per call so a test that
+means to use a DIFFERENT origin (the off-origin exclusion cases) is visibly doing so."""
+
+
 # Long enough to be a plausible non-empty extraction: `internals/extract.py` sets `is_empty`
 # below `MIN_BODY_CHARS` (200), so a helper defaulting to `is_empty=False` needs a body that
 # would genuinely have cleared that bar. Tests that care about a body's CONTENT pass their own.
@@ -49,6 +55,7 @@ def _page(
     description: str | None = None,
     markdown: str = _BODY,
     is_empty: bool = False,
+    status: int = 200,
 ) -> CrawledPage:
     """A `CrawledPage` with only the fields these two functions read spelled out.
 
@@ -58,7 +65,7 @@ def _page(
     """
     return CrawledPage(
         url=url,
-        status=200,
+        status=status,
         title=title,
         content="",
         fetched_at=datetime(2026, 1, 1, tzinfo=UTC),
@@ -118,9 +125,9 @@ def test_neither_the_module_nor_its_output_calls_itself_a_placeholder() -> None:
     assert "placeholder" not in inspect.getsource(llms_txt).lower()
 
     pages = [_page("https://example.test/docs/a", title="A", description="First.")]
-    assert "placeholder" not in generate_llms_txt(pages).lower()
-    assert "placeholder" not in generate_llms_full_txt(pages).lower()
-    assert "placeholder" not in generate_llms_txt([]).lower()
+    assert "placeholder" not in generate_llms_txt(pages, site_url=_SITE).lower()
+    assert "placeholder" not in generate_llms_full_txt(pages, site_url=_SITE).lower()
+    assert "placeholder" not in generate_llms_txt([], site_url=_SITE).lower()
 
 
 # --- the llmstxt.org shape ----------------------------------------------------------------
@@ -132,7 +139,7 @@ def test_the_document_has_exactly_one_h1_and_exactly_one_blockquote() -> None:
         _page("https://example.test/guide/b", title="B"),
         _page("https://example.test/other/c", title="C"),
     ]
-    lines = generate_llms_txt(pages).splitlines()
+    lines = generate_llms_txt(pages, site_url=_SITE).splitlines()
 
     assert sum(1 for line in lines if line.startswith("# ")) == 1
     assert sum(1 for line in lines if line.startswith("> ")) == 1
@@ -144,7 +151,7 @@ def test_the_h1_names_the_sites_own_title_when_the_root_page_carries_one() -> No
         _page("https://example.test/docs/a", title="Configuration | Acme Docs"),
     ]
 
-    assert generate_llms_txt(pages).splitlines()[0] == "# Acme Docs"
+    assert generate_llms_txt(pages, site_url=_SITE).splitlines()[0] == "# Acme Docs"
 
 
 def test_the_h1_falls_back_to_the_origin_when_no_root_page_has_a_title() -> None:
@@ -156,7 +163,7 @@ def test_the_h1_falls_back_to_the_origin_when_no_root_page_has_a_title() -> None
         _page("https://example.test/docs/a", title="Configuration"),
     ]
 
-    assert generate_llms_txt(pages).splitlines()[0] == "# https://example.test"
+    assert generate_llms_txt(pages, site_url=_SITE).splitlines()[0] == "# https://example.test"
 
 
 def test_the_root_pages_title_names_the_site_even_when_that_page_was_empty() -> None:
@@ -167,7 +174,7 @@ def test_the_root_pages_title_names_the_site_even_when_that_page_was_empty() -> 
         _page("https://example.test/", title="Acme Docs", markdown="", is_empty=True),
         _page("https://example.test/docs/a", title="A"),
     ]
-    output = generate_llms_txt(pages)
+    output = generate_llms_txt(pages, site_url=_SITE)
 
     assert output.splitlines()[0] == "# Acme Docs"
     assert _section_of(output, "Docs") == ["- [A](https://example.test/docs/a)"]
@@ -179,7 +186,7 @@ def test_the_blockquote_states_the_indexed_page_count_and_the_origin() -> None:
         _page("https://example.test/docs/a", title="A"),
         _page("https://example.test/docs/b", title="B"),
     ]
-    blockquote = generate_llms_txt(pages).splitlines()[2]
+    blockquote = generate_llms_txt(pages, site_url=_SITE).splitlines()[2]
 
     assert blockquote == "> An index of 2 pages from https://example.test."
 
@@ -189,7 +196,7 @@ def test_the_blockquote_accounts_for_pages_left_out_of_the_index() -> None:
         _page("https://example.test/docs/a", title="A"),
         _page("https://example.test/docs/b", markdown="", is_empty=True),
     ]
-    blockquote = generate_llms_txt(pages).splitlines()[2]
+    blockquote = generate_llms_txt(pages, site_url=_SITE).splitlines()[2]
 
     assert blockquote == (
         "> An index of 1 page from https://example.test. "
@@ -199,7 +206,7 @@ def test_the_blockquote_accounts_for_pages_left_out_of_the_index() -> None:
 
 def test_a_bullet_is_a_titled_link_annotated_with_the_pages_description() -> None:
     pages = [_page("https://example.test/docs/a", title="Configuration", description="How to.")]
-    output = generate_llms_txt(pages)
+    output = generate_llms_txt(pages, site_url=_SITE)
 
     assert "- [Configuration](https://example.test/docs/a): How to." in output
 
@@ -209,27 +216,31 @@ def test_a_page_with_no_description_gets_a_bullet_with_no_trailing_colon() -> No
     empty description — it is a broken line."""
     pages = [_page("https://example.test/docs/a", title="Configuration")]
 
-    assert "- [Configuration](https://example.test/docs/a)\n" in generate_llms_txt(pages)
+    assert "- [Configuration](https://example.test/docs/a)\n" in generate_llms_txt(
+        pages, site_url=_SITE
+    )
 
 
 def test_a_page_with_no_title_is_labelled_from_its_last_path_segment() -> None:
     pages = [_page("https://example.test/docs/getting-started")]
 
     assert "- [Getting Started](https://example.test/docs/getting-started)" in (
-        generate_llms_txt(pages)
+        generate_llms_txt(pages, site_url=_SITE)
     )
 
 
 def test_a_page_with_no_title_drops_a_filename_extension_from_its_label() -> None:
     pages = [_page("https://example.test/docs/intro.html")]
 
-    assert "- [Intro](https://example.test/docs/intro.html)" in generate_llms_txt(pages)
+    assert "- [Intro](https://example.test/docs/intro.html)" in generate_llms_txt(
+        pages, site_url=_SITE
+    )
 
 
 def test_a_titleless_root_page_is_labelled_with_its_host() -> None:
     pages = [_page("https://example.test/")]
 
-    assert "- [example.test](https://example.test/)" in generate_llms_txt(pages)
+    assert "- [example.test](https://example.test/)" in generate_llms_txt(pages, site_url=_SITE)
 
 
 def test_titles_and_descriptions_are_collapsed_onto_one_line() -> None:
@@ -242,7 +253,7 @@ def test_titles_and_descriptions_are_collapsed_onto_one_line() -> None:
             description="First line.\n\tSecond line.",
         )
     ]
-    output = generate_llms_txt(pages)
+    output = generate_llms_txt(pages, site_url=_SITE)
 
     assert "- [Configuration | Acme](https://example.test/docs/a): First line. Second line." in (
         output
@@ -252,20 +263,22 @@ def test_titles_and_descriptions_are_collapsed_onto_one_line() -> None:
 def test_a_whitespace_only_title_falls_back_rather_than_emitting_an_empty_link() -> None:
     pages = [_page("https://example.test/docs/intro", title="   \n  ")]
 
-    assert "- [Intro](https://example.test/docs/intro)" in generate_llms_txt(pages)
+    assert "- [Intro](https://example.test/docs/intro)" in generate_llms_txt(pages, site_url=_SITE)
 
 
 def test_bracket_characters_in_a_title_are_escaped_so_the_link_survives() -> None:
     pages = [_page("https://example.test/docs/a", title="Arrays [and] slices")]
 
-    assert "- [Arrays \\[and\\] slices](https://example.test/docs/a)" in generate_llms_txt(pages)
+    assert "- [Arrays \\[and\\] slices](https://example.test/docs/a)" in generate_llms_txt(
+        pages, site_url=_SITE
+    )
 
 
 def test_parentheses_in_a_url_are_encoded_so_the_link_survives() -> None:
     """Rare — `url_normalize.py` has been over every URL that reaches here — but a single
     unescaped `)` silently truncates the link target and corrupts the rest of the line."""
     pages = [_page("https://example.test/docs/f(x)", title="F")]
-    output = generate_llms_txt(pages)
+    output = generate_llms_txt(pages, site_url=_SITE)
 
     assert "- [F](https://example.test/docs/f%28x%29)" in output
 
@@ -293,14 +306,14 @@ def test_a_leading_path_segment_becomes_a_readable_section_name(path: str, secti
     """The curated table exists for the names humanizing gets wrong (`api` -> "Api") and for
     merging synonyms (`doc`/`docs`/`documentation`); everything else is humanized, so a site
     using `/blog/` or `/getting-started/` gets a real section rather than a bucket."""
-    output = generate_llms_txt([_page(f"https://example.test{path}", title="T")])
+    output = generate_llms_txt([_page(f"https://example.test{path}", title="T")], site_url=_SITE)
 
     assert f"## {section}" in output
 
 
 @pytest.mark.parametrize("path", ["/", "/sitemap.xml", "/-/"])
 def test_a_page_with_no_readable_leading_segment_lands_in_other(path: str) -> None:
-    output = generate_llms_txt([_page(f"https://example.test{path}", title="T")])
+    output = generate_llms_txt([_page(f"https://example.test{path}", title="T")], site_url=_SITE)
 
     assert "## Other" in output
 
@@ -314,7 +327,11 @@ def test_sections_are_ordered_curated_first_then_alphabetically_then_other() -> 
         _page("https://example.test/docs/a", title="D"),
         _page("https://example.test/guide/a", title="G"),
     ]
-    headings = [line for line in generate_llms_txt(pages).splitlines() if line.startswith("## ")]
+    headings = [
+        line
+        for line in generate_llms_txt(pages, site_url=_SITE).splitlines()
+        if line.startswith("## ")
+    ]
 
     assert headings == ["## Docs", "## Guide", "## API", "## Blog", "## Zebra", "## Other"]
 
@@ -326,7 +343,7 @@ def test_pages_within_a_section_stay_in_url_order() -> None:
         _page("https://example.test/docs/m", title="M"),
     ]
 
-    assert _section_of(generate_llms_txt(pages), "Docs") == [
+    assert _section_of(generate_llms_txt(pages, site_url=_SITE), "Docs") == [
         "- [A](https://example.test/docs/a)",
         "- [M](https://example.test/docs/m)",
         "- [Z](https://example.test/docs/z)",
@@ -357,8 +374,10 @@ def test_a_shuffled_pages_list_produces_byte_identical_output(seed: int) -> None
     shuffled = list(pages)
     random.Random(seed).shuffle(shuffled)
 
-    assert generate_llms_txt(shuffled) == generate_llms_txt(pages)
-    assert generate_llms_full_txt(shuffled) == generate_llms_full_txt(pages)
+    assert generate_llms_txt(shuffled, site_url=_SITE) == generate_llms_txt(pages, site_url=_SITE)
+    assert generate_llms_full_txt(shuffled, site_url=_SITE) == generate_llms_full_txt(
+        pages, site_url=_SITE
+    )
 
 
 def test_two_pages_sharing_a_url_cannot_reorder_the_output() -> None:
@@ -368,7 +387,9 @@ def test_two_pages_sharing_a_url_cannot_reorder_the_output() -> None:
     first = _page("https://example.test/docs/a", title="A")
     second = _page("https://example.test/docs/a", title="B")
 
-    assert generate_llms_txt([first, second]) == generate_llms_txt([second, first])
+    assert generate_llms_txt([first, second], site_url=_SITE) == generate_llms_txt(
+        [second, first], site_url=_SITE
+    )
 
 
 def test_two_root_pages_sharing_a_url_cannot_change_the_project_name() -> None:
@@ -379,23 +400,30 @@ def test_two_root_pages_sharing_a_url_cannot_change_the_project_name() -> None:
     alpha = _page("https://example.test/", title="Alpha")
     beta = _page("https://example.test/", title="Beta")
 
-    assert generate_llms_txt([alpha, beta]) == generate_llms_txt([beta, alpha])
-    assert generate_llms_full_txt([alpha, beta]) == generate_llms_full_txt([beta, alpha])
+    assert generate_llms_txt([alpha, beta], site_url=_SITE) == generate_llms_txt(
+        [beta, alpha], site_url=_SITE
+    )
+    assert generate_llms_full_txt([alpha, beta], site_url=_SITE) == generate_llms_full_txt(
+        [beta, alpha], site_url=_SITE
+    )
 
 
 # --- the empty and all-empty cases ---------------------------------------------------------
 
 
 def test_empty_input_returns_a_stable_document_rather_than_raising() -> None:
-    assert generate_llms_txt([]) == generate_llms_txt([])
-    assert generate_llms_full_txt([]) == generate_llms_full_txt([])
-    assert "No pages were fetched" in generate_llms_txt([])
+    assert generate_llms_txt([], site_url=_SITE) == generate_llms_txt([], site_url=_SITE)
+    assert generate_llms_full_txt([], site_url=_SITE) == generate_llms_full_txt([], site_url=_SITE)
+    assert "No pages were fetched" in generate_llms_txt([], site_url=_SITE)
 
 
 def test_the_empty_document_still_has_one_h1_and_one_blockquote() -> None:
     """Same SHAPE as a full artifact, so a consumer never has to special-case a run that
     fetched nothing. Never `""`, which in a `text` column is indistinguishable from a bug."""
-    for output in (generate_llms_txt([]), generate_llms_full_txt([])):
+    for output in (
+        generate_llms_txt([], site_url=_SITE),
+        generate_llms_full_txt([], site_url=_SITE),
+    ):
         lines = output.splitlines()
         assert sum(1 for line in lines if line.startswith("# ")) == 1
         assert sum(1 for line in lines if line.startswith("> ")) == 1
@@ -406,7 +434,7 @@ def test_empty_pages_are_omitted_from_the_index() -> None:
         _page("https://example.test/docs/a", title="A"),
         _page("https://example.test/docs/b", title="B", markdown="", is_empty=True),
     ]
-    output = generate_llms_txt(pages)
+    output = generate_llms_txt(pages, site_url=_SITE)
 
     assert "https://example.test/docs/a" in output
     assert "https://example.test/docs/b" not in output
@@ -419,12 +447,12 @@ def test_a_run_whose_pages_are_all_empty_still_produces_a_document_with_no_secti
         _page("https://example.test/", title="Acme", markdown="", is_empty=True),
         _page("https://example.test/docs/a", markdown="", is_empty=True),
     ]
-    output = generate_llms_txt(pages)
+    output = generate_llms_txt(pages, site_url=_SITE)
 
     assert output.splitlines()[0] == "# Acme"
     assert "> An index of 0 pages from https://example.test." in output
     assert "## " not in output
-    assert count_indexed_pages(pages) == 0
+    assert count_indexed_pages(pages, site_url=_SITE) == 0
 
 
 def test_count_indexed_pages_counts_only_the_pages_the_index_lists() -> None:
@@ -434,15 +462,19 @@ def test_count_indexed_pages_counts_only_the_pages_the_index_lists() -> None:
         _page("https://example.test/docs/c", markdown="", is_empty=True),
     ]
 
-    assert count_indexed_pages(pages) == 2
+    assert count_indexed_pages(pages, site_url=_SITE) == 2
     assert len(pages) == 3, "this is the divergence RUN_STATS_VERSION 3 records"
 
 
 def test_count_indexed_pages_matches_the_bullets_the_artifact_actually_emits() -> None:
     pages = _mixed_pages()
-    bullets = [line for line in generate_llms_txt(pages).splitlines() if line.startswith("- ")]
+    bullets = [
+        line
+        for line in generate_llms_txt(pages, site_url=_SITE).splitlines()
+        if line.startswith("- ")
+    ]
 
-    assert count_indexed_pages(pages) == len(bullets)
+    assert count_indexed_pages(pages, site_url=_SITE) == len(bullets)
 
 
 # --- llms-full.txt --------------------------------------------------------------------------
@@ -450,7 +482,7 @@ def test_count_indexed_pages_matches_the_bullets_the_artifact_actually_emits() -
 
 def test_llms_full_txt_emits_a_heading_and_the_pages_markdown_for_each_page() -> None:
     pages = [_page("https://example.test/docs/a", title="Configuration", markdown="Body text.")]
-    output = generate_llms_full_txt(pages)
+    output = generate_llms_full_txt(pages, site_url=_SITE)
 
     assert "## Configuration" in output
     assert "Body text." in output
@@ -464,7 +496,7 @@ def test_llms_full_txt_follows_the_index_order_not_plain_url_order() -> None:
         _page("https://example.test/api/a", title="API Page"),
         _page("https://example.test/docs/b", title="Docs Page"),
     ]
-    output = generate_llms_full_txt(pages)
+    output = generate_llms_full_txt(pages, site_url=_SITE)
 
     assert output.index("## Docs Page") < output.index("## API Page")
 
@@ -473,7 +505,7 @@ def test_llms_full_txt_never_emits_firecrawl_page_separators() -> None:
     """Firecrawl emits `<|firecrawl-page-N-lllmstxt|>` between pages and then strips them out
     again with a regex before anything consumes the result. Copying a marker whose own author
     removes it would be copying the bug."""
-    output = generate_llms_full_txt(_mixed_pages())
+    output = generate_llms_full_txt(_mixed_pages(), site_url=_SITE)
 
     assert "firecrawl" not in output.lower()
     assert "<|" not in output
@@ -484,7 +516,7 @@ def test_llms_full_txt_omits_the_pages_the_index_omits() -> None:
         _page("https://example.test/docs/a", title="Kept", markdown="Kept body."),
         _page("https://example.test/docs/b", title="Skipped", markdown="", is_empty=True),
     ]
-    output = generate_llms_full_txt(pages)
+    output = generate_llms_full_txt(pages, site_url=_SITE)
 
     assert "## Kept" in output
     assert "## Skipped" not in output
@@ -495,7 +527,7 @@ def test_a_heading_in_the_full_text_is_not_bracket_escaped() -> None:
     first needs its brackets escaped — a `\\[` in a heading renders literally."""
     pages = [_page("https://example.test/docs/a", title="Arrays [and] slices")]
 
-    assert "## Arrays [and] slices" in generate_llms_full_txt(pages)
+    assert "## Arrays [and] slices" in generate_llms_full_txt(pages, site_url=_SITE)
 
 
 # --- the caps -------------------------------------------------------------------------------
@@ -504,11 +536,11 @@ def test_a_heading_in_the_full_text_is_not_bracket_escaped() -> None:
 def test_a_page_over_the_per_page_cap_is_truncated_and_says_so() -> None:
     oversized = "x" * (MAX_PAGE_TEXT_BYTES + 5_000)
     pages = [_page("https://example.test/docs/a", title="Big", markdown=oversized)]
-    output = generate_llms_full_txt(pages)
+    output = generate_llms_full_txt(pages, site_url=_SITE)
 
     assert "Truncated" in output
     assert oversized not in output
-    assert count_full_txt_truncations(pages) == 1
+    assert count_full_txt_truncations(pages, site_url=_SITE) == 1
 
 
 def test_the_per_page_cap_is_measured_in_utf8_bytes_not_characters() -> None:
@@ -518,14 +550,14 @@ def test_the_per_page_cap_is_measured_in_utf8_bytes_not_characters() -> None:
     pages = [_page("https://example.test/docs/a", title="Big", markdown=body)]
 
     assert len(body) < MAX_PAGE_TEXT_BYTES < len(body.encode())
-    assert count_full_txt_truncations(pages) == 1
+    assert count_full_txt_truncations(pages, site_url=_SITE) == 1
 
 
 def test_truncation_never_splits_a_multibyte_character() -> None:
     """A cut landing mid-character must drop that character, not emit a lone continuation byte
     or a replacement character."""
     pages = [_page("https://example.test/docs/a", title="Big", markdown="あ" * 30_000)]
-    output = generate_llms_full_txt(pages)
+    output = generate_llms_full_txt(pages, site_url=_SITE)
 
     assert "�" not in output
     output.encode()  # would raise on a lone surrogate
@@ -542,13 +574,13 @@ def test_the_run_cap_stops_at_a_page_boundary_and_says_how_many_were_dropped(
         _page(f"https://example.test/docs/{index:02d}", title=f"P{index}", markdown=body)
         for index in range(10)
     ]
-    output = generate_llms_full_txt(pages)
+    output = generate_llms_full_txt(pages, site_url=_SITE)
 
     assert "Truncated" in output
     assert output.count(body) >= 1, "whole pages, never a partial one"
     included = output.count("\n## ")
     assert 0 < included < 10
-    assert count_full_txt_truncations(pages) == 10 - included
+    assert count_full_txt_truncations(pages, site_url=_SITE) == 10 - included
 
 
 def test_the_run_cap_leaves_the_index_and_its_link_count_untouched(
@@ -562,8 +594,8 @@ def test_the_run_cap_leaves_the_index_and_its_link_count_untouched(
         for index in range(10)
     ]
 
-    assert count_indexed_pages(pages) == 10
-    assert generate_llms_txt(pages).count("\n- ") == 10
+    assert count_indexed_pages(pages, site_url=_SITE) == 10
+    assert generate_llms_txt(pages, site_url=_SITE).count("\n- ") == 10
 
 
 def test_the_full_text_never_exceeds_the_run_cap_at_realistic_sizes() -> None:
@@ -577,15 +609,15 @@ def test_the_full_text_never_exceeds_the_run_cap_at_realistic_sizes() -> None:
         )
         for index in range(150)
     ]
-    output = generate_llms_full_txt(pages)
+    output = generate_llms_full_txt(pages, site_url=_SITE)
 
     assert len(output.encode()) <= MAX_FULL_TEXT_BYTES
-    assert count_full_txt_truncations(pages) > 0
+    assert count_full_txt_truncations(pages, site_url=_SITE) > 0
 
 
 def test_full_txt_truncated_is_zero_when_every_page_fits() -> None:
-    assert count_full_txt_truncations(_mixed_pages()) == 0
-    assert count_full_txt_truncations([]) == 0
+    assert count_full_txt_truncations(_mixed_pages(), site_url=_SITE) == 0
+    assert count_full_txt_truncations([], site_url=_SITE) == 0
 
 
 def test_a_page_both_trimmed_and_then_dropped_is_counted_once(
@@ -603,7 +635,7 @@ def test_a_page_both_trimmed_and_then_dropped_is_counted_once(
         for index in range(4)
     ]
 
-    assert count_full_txt_truncations(pages) == len(pages)
+    assert count_full_txt_truncations(pages, site_url=_SITE) == len(pages)
 
 
 def test_an_enormous_title_cannot_push_the_full_text_past_the_run_cap() -> None:
@@ -613,8 +645,8 @@ def test_an_enormous_title_cannot_push_the_full_text_past_the_run_cap() -> None:
     `MAX_FULL_TEXT_BYTES` never got a say and an unbounded value reached a Postgres column."""
     pages = [_page("https://example.test/", title="T" * (8 * 1024 * 1024))]
 
-    assert len(generate_llms_full_txt(pages).encode()) <= MAX_FULL_TEXT_BYTES
-    assert len(generate_llms_txt(pages).encode()) <= MAX_FULL_TEXT_BYTES
+    assert len(generate_llms_full_txt(pages, site_url=_SITE).encode()) <= MAX_FULL_TEXT_BYTES
+    assert len(generate_llms_txt(pages, site_url=_SITE).encode()) <= MAX_FULL_TEXT_BYTES
 
 
 def test_an_enormous_description_cannot_bloat_the_index() -> None:
@@ -622,13 +654,13 @@ def test_an_enormous_description_cannot_bloat_the_index() -> None:
     description is what makes that assumption true."""
     pages = [_page("https://example.test/docs/a", title="A", description="D" * (8 * 1024 * 1024))]
 
-    assert len(generate_llms_txt(pages).encode()) < 10_000
+    assert len(generate_llms_txt(pages, site_url=_SITE).encode()) < 10_000
 
 
 @pytest.mark.parametrize("field", ["title", "description"])
 def test_an_over_long_title_or_description_is_cut_and_marked(field: str) -> None:
     pages = [_page("https://example.test/docs/a", **{field: "word " * 500})]
-    output = generate_llms_txt(pages)
+    output = generate_llms_txt(pages, site_url=_SITE)
 
     assert "…" in output
     assert len(max(output.splitlines(), key=len)) < MAX_TEXT_CHARS + 200
@@ -640,14 +672,104 @@ def test_a_title_at_the_limit_is_left_exactly_as_it_is() -> None:
     title = "T" * MAX_TEXT_CHARS
     pages = [_page("https://example.test/docs/a", title=title)]
 
-    assert f"- [{title}](https://example.test/docs/a)" in generate_llms_txt(pages)
+    assert f"- [{title}](https://example.test/docs/a)" in generate_llms_txt(pages, site_url=_SITE)
 
 
 def test_a_page_with_no_markdown_body_is_not_counted_as_truncated() -> None:
     """Only constructible by hand — `is_empty` is derived from the body's length — but nothing
     was cut, so nothing is reported as cut."""
     pages = [_page("https://example.test/docs/a", title="A", markdown="", is_empty=False)]
-    output = generate_llms_full_txt(pages)
+    output = generate_llms_full_txt(pages, site_url=_SITE)
 
     assert "## A" in output
-    assert count_full_txt_truncations(pages) == 0
+    assert count_full_txt_truncations(pages, site_url=_SITE) == 0
+
+
+# --- Exclusions that are not `is_empty` -------------------------------------------------
+#
+# Both regressions below were found by running the real pipeline against live sites, and both
+# produced a WRONG artifact rather than a crash — which is why each pins the specific output
+# that was observed, not merely "the page is absent."
+
+
+def test_a_non_2xx_page_is_omitted_from_the_index() -> None:
+    """A `404`/`429`/`5xx` body is real HTML with a real `<title>`, so `is_empty` does not
+    catch it. Observed live: four `429 Too Many Requests` pages entered anthropic.com's index
+    as ordinary bullets."""
+    pages = [
+        _page("https://example.test/docs/a", title="A"),
+        _page("https://example.test/docs/rate-limited", title="Too Many Requests", status=429),
+        _page("https://example.test/docs/gone", title="Not Found", status=404),
+    ]
+    output = generate_llms_txt(pages, site_url=_SITE)
+
+    assert "https://example.test/docs/a" in output
+    assert "Too Many Requests" not in output
+    assert "Not Found" not in output
+    assert count_indexed_pages(pages, site_url=_SITE) == 1
+
+
+def test_a_page_that_landed_on_another_host_is_omitted_from_the_index() -> None:
+    """`CrawledPage.url` is the FINAL url after redirects, so a same-origin request can come
+    back off-origin. Such a page is about a different site and does not belong in this one's
+    index."""
+    pages = [
+        _page("https://example.test/docs/a", title="A"),
+        _page("https://cdn.example.net/assets/brochure", title="Brochure"),
+    ]
+    output = generate_llms_txt(pages, site_url=_SITE)
+
+    assert "https://example.test/docs/a" in output
+    assert "cdn.example.net" not in output
+    assert count_indexed_pages(pages, site_url=_SITE) == 1
+
+
+def test_one_off_origin_page_cannot_rename_the_whole_artifact() -> None:
+    """**The `# https://claude.com` regression, pinned directly.**
+
+    `_origin` used to be `min(page.url for page in pages)` — the alphabetically first URL the
+    run collected. Here `https://cdn.example.net/...` sorts before `https://example.test/...`,
+    so the old implementation titled the document after the CDN and then skipped the correct
+    root page, whose origin no longer matched the one it had just derived. Exactly what one
+    redirected page out of a hundred did to anthropic.com (`# https://claude.com`) and one CDN
+    asset did to stripe.com (`# https://assets.ctfassets.net`).
+
+    The site's own root page is deliberately listed LAST here, so a regression cannot pass by
+    accident of ordering.
+    """
+    pages = [
+        _page("https://cdn.example.net/assets/brochure", title="Brochure"),
+        _page("https://example.test/docs/a", title="A"),
+        _page("https://example.test/", title="Acme Docs"),
+    ]
+    output = generate_llms_txt(pages, site_url=_SITE)
+
+    assert output.splitlines()[0] == "# Acme Docs"
+    assert "> An index of 2 pages from https://example.test." in output
+    assert "cdn.example.net" not in output
+
+
+def test_the_artifact_describes_site_url_even_when_no_page_shares_its_origin() -> None:
+    """The degenerate case the old derivation could not express at all: `site_url` is what the
+    document claims, so an index of zero pages still names the right site rather than naming
+    whichever host happened to answer."""
+    pages = [_page("https://cdn.example.net/assets/brochure", title="Brochure")]
+    output = generate_llms_txt(pages, site_url=_SITE)
+
+    assert output.splitlines()[0] == "# https://example.test"
+    assert "> An index of 0 pages from https://example.test." in output
+
+
+def test_the_full_text_applies_the_same_exclusions_as_the_index() -> None:
+    """The two artifacts are read together — a body in `llms-full.txt` with no link in
+    `llms.txt` is exactly the disagreement `_index_entries` is shared to prevent."""
+    pages = [
+        _page("https://example.test/docs/a", title="A"),
+        _page("https://example.test/docs/gone", title="Not Found", status=404),
+        _page("https://cdn.example.net/assets/brochure", title="Brochure"),
+    ]
+    full = generate_llms_full_txt(pages, site_url=_SITE)
+
+    assert "## A" in full
+    assert "Not Found" not in full
+    assert "Brochure" not in full

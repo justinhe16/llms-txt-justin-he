@@ -145,7 +145,7 @@ async def test_success_writes_a_completed_row_with_artifact_storage_path_and_sta
     assert row["completed_at"] is not None
 
     stats = json.loads(row["stats"])
-    assert stats["version"] == 11
+    assert stats["version"] == 12
     assert stats["pages_crawled"] == 1
     assert "cap_hit" in stats
     assert stats["pages_empty_content"] == 1, "the ok_handler's body has no extractable content"
@@ -424,7 +424,7 @@ async def test_partial_stats_survive_an_upload_failure(websites_db: Pool) -> Non
     assert row is not None
     stats = json.loads(row["stats"])
     assert stats["pages_crawled"] == 1
-    assert stats["version"] == 11
+    assert stats["version"] == 12
     # A failure row carries the same KEYS as a success row, at their hoisted defaults — the
     # shape `runs.stats` stores must not depend on how far a run got before it failed. The
     # four PER-180 counters are part of that same guarantee now: this suite's `_execute`
@@ -1039,7 +1039,7 @@ async def test_a_site_with_no_sitemap_falls_back_to_the_links_on_its_seed_page(
     assert stats["urls_discovered"] == 3, "off-origin, mailto: and fragment-only never count"
     assert stats["urls_selected"] == 3
     assert stats["pages_crawled"] == 4
-    assert stats["version"] == 11, (
+    assert stats["version"] == 12, (
         "a new VALUE for an existing key is still not a new shape — PER-178 added "
         '`discovery_source: "links"` and deliberately did not bump for it. This row reads 11 '
         "because PER-180, PER-191, PER-193, PER-194, PER-196, PER-201, and this repo's own "
@@ -1431,7 +1431,7 @@ async def test_model_titles_reach_llms_txt_and_the_extracted_title_does_not(
     assert "Extracted Title Nobody Should See In The Artifact" not in row["llms_txt"]
 
     stats = json.loads(row["stats"])
-    assert stats["version"] == 11
+    assert stats["version"] == 12
     assert stats["pages_enriched"] == 1
     assert stats["enrich_failures"] == 0
 
@@ -2270,7 +2270,72 @@ async def test_stats_version_is_eleven(websites_db: Pool) -> None:
     row = await websites_db.fetchrow("SELECT stats FROM runs WHERE id = $1", run_id)
     assert row is not None
     stats = json.loads(row["stats"])
-    assert stats["version"] == 11
+    assert stats["version"] == 12
     assert stats["max_pages"] == settings.crawl_max_pages
     assert stats["pages_blocked"] == 0
     assert stats["blocked_reason"] is None
+
+
+# -----------------------------------------------------------------------------------------
+# Non-2xx seed responses that `internals/blocked.py` declines to call an access block: the run
+# fails with a message naming the status, and the retry decision follows the status too.
+# -----------------------------------------------------------------------------------------
+
+
+async def test_a_run_whose_seed_returns_404_fails_instead_of_publishing_the_error_page(
+    websites_db: Pool,
+) -> None:
+    """[Non-2xx seed — permanent]. The regression this pins is not a crash: a `404` body is
+    real HTML with a real `<title>`, so before `SeedHttpError` this run COMPLETED, published
+    an artifact headed `# 404 Not Found`, and reported an index of zero pages. A wrong answer
+    recorded as a success is worse than a failure, which is why the assertions below cover the
+    stored artifact columns as much as the status."""
+    _website_id, run_id = await _seed_pending_clean_origin(websites_db, "seed-404")
+    storage = FakeStorage()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, html="<html><head><title>404 Not Found</title></head></html>")
+
+    outcome = await _execute(websites_db, storage, run_id, handler)
+    assert outcome is None
+
+    row = await websites_db.fetchrow(
+        "SELECT status, error, stats, llms_txt, llms_full_txt FROM runs WHERE id = $1", run_id
+    )
+    assert row is not None
+    assert row["status"] == "failed"
+    error = row["error"]
+    assert isinstance(error, str)
+    assert "404" in error
+    assert "not found" in error.lower()
+    assert "404 Not Found" not in (row["llms_txt"] or ""), "the error page's own title"
+    assert row["llms_txt"] is None
+    assert row["llms_full_txt"] is None
+    assert storage.calls == [], "a failed seed fetch never reaches the Storage upload step"
+
+    stats = json.loads(row["stats"])
+    assert stats["pages_crawled"] == 0, "a non-2xx seed is never appended to pages"
+    assert stats["pages_http_error"] == 1
+    assert stats["pages_blocked"] == 0, "a 404 is not an access block"
+    assert stats["blocked_reason"] is None
+
+
+async def test_a_run_whose_seed_returns_503_is_retried_rather_than_failed_outright(
+    websites_db: Pool,
+) -> None:
+    """[Non-2xx seed — retryable]. The other half of the split: a `5xx` is a site that may
+    answer differently in five minutes, so the attempt ends in a retry rather than a terminal
+    `failed` row. `_execute` returning a pending retry, and the run being back in `pending`,
+    is the same shape every other retryable seed error produces."""
+    _website_id, run_id = await _seed_pending_clean_origin(websites_db, "seed-503")
+    storage = FakeStorage()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, html="<html><head><title>Service Unavailable</title></head>")
+
+    with pytest.raises(TransientCrawlError):
+        await _execute(websites_db, storage, run_id, handler, max_attempts=3)
+
+    row = await websites_db.fetchrow("SELECT status FROM runs WHERE id = $1", run_id)
+    assert row is not None
+    assert row["status"] == "pending", "a retryable seed error leaves the run for another go"

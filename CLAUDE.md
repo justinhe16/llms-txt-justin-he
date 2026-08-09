@@ -66,10 +66,14 @@ must never be prefixed `NEXT_PUBLIC_`.
 downstream of a fetched page stays behind one seam:
 
 ```python
-def generate_llms_txt(pages: list[CrawledPage]) -> str:      # the llms.txt index
+def generate_llms_txt(                                       # the llms.txt index
+    pages: list[CrawledPage], *, site_url: str
+) -> str:
     ...
 
-def generate_llms_full_txt(pages: list[CrawledPage]) -> str: # the llms-full.txt expansion
+def generate_llms_full_txt(                                  # the llms-full.txt expansion
+    pages: list[CrawledPage], *, site_url: str
+) -> str:
     ...
 ```
 
@@ -83,6 +87,16 @@ is already taken (ARCHITECTURE.md §3.4).
 
 Build against those signatures, and do not widen them without a ticket that redesigns the
 seam. Do not scatter crawling, parsing, or LLM-calling logic through the services.
+
+**`site_url` was that redesign, and it is the only parameter either function gets that is
+not a fetched page.** The seam originally took `pages` alone and derived the origin it was
+describing from them — `min(page.url for page in pages)`, the alphabetically first URL the
+run collected. That held only while every page shared an origin, which is true of what the
+crawler *requests* and false of what it *collects*: `CrawledPage.url` is the final url after
+redirects, so one page answering from another host renamed the whole document. It titled
+Anthropic's artifact `# https://claude.com` off a single redirected page out of a hundred.
+An origin the artifact is *given* cannot be outvoted by the pages it lists; an origin it
+*derives* can. Do not re-derive it, and do not add a second way to pass it.
 
 ---
 

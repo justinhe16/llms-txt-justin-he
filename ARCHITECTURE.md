@@ -275,10 +275,14 @@ Everything downstream of a fetched, parsed page lives behind one pair of functio
 module (`internals/llms_txt.py`):
 
 ```python
-def generate_llms_txt(pages: list[CrawledPage]) -> str:      # the llms.txt index
+def generate_llms_txt(                                       # the llms.txt index
+    pages: list[CrawledPage], *, site_url: str
+) -> str:
     ...
 
-def generate_llms_full_txt(pages: list[CrawledPage]) -> str: # the llms-full.txt expansion
+def generate_llms_full_txt(                                  # the llms-full.txt expansion
+    pages: list[CrawledPage], *, site_url: str
+) -> str:
     ...
 ```
 
@@ -294,6 +298,24 @@ added exactly that, one layer up, in `internals/enrich.py` (see the new paragrap
 `list[CrawledPage]` and return `str` with no network call anywhere inside either one, and that
 half of the sentence remains true precisely because the model-calling layer was built beside
 this module rather than into it.
+
+**The seam widened once, to take `site_url`, and the reason is worth stating because it is
+the argument against widening it again.** Both functions previously derived the origin they
+were describing from the pages themselves — `min(page.url for page in pages)`. That is
+correct only while every page shares an origin, which is a property of what the crawler
+*requests*, not of what it *collects*: `CrawledPage.url` is the final url after redirects, so
+a single page answering from another host was enough to retitle the document. Observed on
+real sites: one redirected page out of a hundred titled Anthropic's artifact
+`# https://claude.com`, and one CDN asset titled Stripe's `# https://assets.ctfassets.net`,
+in both cases while the correct root page sat in `pages` with a usable title, skipped because
+the derived origin no longer matched it.
+
+The fix is not a better heuristic — it is refusing to guess. The service passes
+`result.seed_origin or website.url`: the origin the seed's fetch actually landed on, so a
+site that has moved hosts wholesale is described by the host it moved to, with the registered
+URL as the fallback for the seed-failure case that cannot reach the call. Everything else
+about the seam is unchanged: still pure, still deterministic, still model-free, and still
+returning `str`.
 
 `CrawledPage`, not `Page`: `app.core.pagination.Page` already names the generic pagination
 envelope returned by `GET /websites/{id}/runs`, and a second, unrelated `Page` in the same
@@ -396,6 +418,18 @@ that held while the artifact was a stand-in and does not now. The rule that surv
 one that was always doing the work, is that nothing **upstream** of the seam may decide what
 to fetch, what to keep, or how to crawl because a page is empty. Such a page is still fetched,
 still written to the run's payload, and still counted.
+
+`is_empty` is no longer the only reason the index leaves a fetched page out, and the two that
+joined it are a different kind of rule rather than an erosion of this one. `_index_entries`
+also excludes a page whose response was **not a 2xx** and a page whose final url is **not on
+the origin the artifact claims to describe**. Neither is a judgement about content quality —
+which is what this paragraph exists to keep upstream of the seam — and neither can be
+expressed by `is_empty`, because a `404` and a redirected CDN asset are both real HTML with a
+real `<title>`. Both are also applied upstream, in `internals/crawler.py`, where each is
+counted under its own name (`pages_http_error`, `pages_off_origin`) so the provenance panel
+can say which reason applied; restating them at the seam is the artifact asserting its own
+invariant over any `pages` list it is handed, not a second implementation of the crawler's
+filter.
 
 In particular, `CrawledPage.title` is never nulled because a page's `is_empty` is `True`, even
 for the JavaScript-shell case the flag exists to measure: a shell is real HTML with a real
