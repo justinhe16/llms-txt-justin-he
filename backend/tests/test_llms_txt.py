@@ -773,3 +773,34 @@ def test_the_full_text_applies_the_same_exclusions_as_the_index() -> None:
     assert "## A" in full
     assert "Not Found" not in full
     assert "Brochure" not in full
+
+
+def test_apex_and_www_pages_belong_to_one_artifact() -> None:
+    """`www` is not a different site, so neither spelling drops the other's pages. The
+    blockquote still names the origin the run actually landed on — the DISPLAY form keeps its
+    host (`_origin`), only the membership comparison folds (`_origin_key`)."""
+    pages = [
+        _page("https://www.example.test/docs/a", title="A"),
+        _page("https://example.test/docs/b", title="B"),
+    ]
+
+    from_www = generate_llms_txt(pages, site_url="https://www.example.test")
+    from_apex = generate_llms_txt(pages, site_url="https://example.test")
+
+    for output in (from_www, from_apex):
+        assert "https://www.example.test/docs/a" in output
+        assert "https://example.test/docs/b" in output
+    assert "> An index of 2 pages from https://www.example.test." in from_www
+    assert "> An index of 2 pages from https://example.test." in from_apex
+
+
+def test_a_host_merely_starting_with_www_is_still_another_site() -> None:
+    """The fold is one label, not a prefix match."""
+    pages = [
+        _page("https://example.test/docs/a", title="A"),
+        _page("https://www2.example.test/docs/b", title="B"),
+    ]
+    output = generate_llms_txt(pages, site_url=_SITE)
+
+    assert "https://example.test/docs/a" in output
+    assert "www2.example.test" not in output

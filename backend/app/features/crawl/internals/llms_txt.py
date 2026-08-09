@@ -60,6 +60,7 @@ from dataclasses import dataclass
 from typing import Final
 from urllib.parse import urlsplit
 
+from app.features.crawl.internals.url_ranking import strip_www
 from app.features.crawl.schemas import CrawledPage
 
 
@@ -473,6 +474,7 @@ def _index_entries(pages: list[CrawledPage], origin: str) -> list[_Entry]:
     any future caller that does not come through `crawl_site`. The seam is not entitled to
     assume its input was already filtered; that assumption is what `_origin` used to make.
     """
+    origin_key = _origin_key(origin)
     ordered = sorted(pages, key=_ordering_key)
     entries = [
         _Entry(
@@ -483,7 +485,7 @@ def _index_entries(pages: list[CrawledPage], origin: str) -> list[_Entry]:
             markdown=page.markdown,
         )
         for page in ordered
-        if not page.is_empty and 200 <= page.status < 300 and _page_origin(page.url) == origin
+        if not page.is_empty and 200 <= page.status < 300 and _origin_key(page.url) == origin_key
     ]
     entries.sort(key=lambda entry: (_section_rank(entry.section), entry.section))
     return entries
@@ -596,11 +598,20 @@ def _origin(site_url: str) -> str:
     return f"{parts.scheme}://{parts.netloc}"
 
 
-def _page_origin(url: str) -> str:
-    """One page's scheme and host, spelled exactly as `_origin` spells the artifact's, so the
-    two can be compared with `==` in `_index_entries`."""
+def _origin_key(url: str) -> str:
+    """The MEMBERSHIP form of an origin: scheme and host with a leading `www.` folded away.
+
+    Distinct from `_origin` above, which is the DISPLAY form and keeps the host exactly as the
+    run landed on it — the blockquote says "an index of N pages from
+    `https://www.example.com`" because that is where the pages came from, and rewriting it to
+    the apex would name a host that appears in none of the links below it.
+
+    What folds is only the comparison. An apex page and a `www` page belong to one site (see
+    `internals/url_ranking.py`'s `strip_www`), so an artifact built for either spelling lists
+    both rather than silently dropping half its own pages.
+    """
     parts = urlsplit(url)
-    return f"{parts.scheme}://{parts.netloc}"
+    return f"{parts.scheme}://{strip_www(parts.netloc)}"
 
 
 def _project_name(pages: list[CrawledPage], origin: str) -> str:

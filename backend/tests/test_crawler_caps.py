@@ -1017,6 +1017,32 @@ async def test_a_frontier_page_that_redirects_to_another_host_is_counted_and_dro
     assert result.stats["pages_off_origin"] == 1
 
 
+async def test_a_redirect_between_the_apex_and_www_is_not_off_origin() -> None:
+    """`www` is not a different site (`internals/url_ranking.py`'s `strip_www`). A frontier
+    URL on the apex that answers from `www` is a page this site pointed at, and dropping it
+    would exclude the site's own content on the most common configuration on the web."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if _host(request).startswith("www."):
+            return httpx.Response(200, text="ok")
+        if str(request.url).endswith("/moved"):
+            return httpx.Response(301, headers={"Location": "http://www.seed.test/moved"})
+        return httpx.Response(200, text="ok")
+
+    async with _client(handler) as client:
+        result = await crawl_site(
+            client,
+            "http://seed.test/",
+            limits=_limits(),
+            extra_urls=["http://seed.test/moved"],
+            resolver=_fake_resolver(),
+        )
+
+    assert result.seed_error is None
+    assert "http://www.seed.test/moved" in [page.url for page in result.pages]
+    assert result.stats["pages_off_origin"] == 0
+
+
 async def test_the_frontier_is_not_re_filtered_by_origin_only_redirects_are() -> None:
     """The rule is about where a fetch LANDED, never about which URLs the caller chose:
     `crawl_site`'s frontier is a parameter it does not second-guess (module docstring), and

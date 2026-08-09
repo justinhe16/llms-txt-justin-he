@@ -55,19 +55,39 @@ def test_origin_normalization(submitted: str, expected_origin: str) -> None:
     assert normalize_url(submitted).origin == expected_origin
 
 
-def test_www_is_kept_because_it_can_serve_different_content() -> None:
-    """`www.example.com` and `example.com` are NOT folded together.
+def test_a_leading_www_is_folded_into_the_apex_origin() -> None:
+    """`www.example.com` and `example.com` dedupe to one website.
 
-    The single most tempting "improvement" to this module, and the one that would silently
-    generate one site's llms.txt from another site's pages. See the module docstring in
-    url_normalize.py.
+    **This reverses what this module used to assert**, and the module docstring carries the
+    argument. The short version: `origin` deduplicates, `url` is what gets crawled, and `url`
+    keeps the host as typed — so folding the origin never builds an artifact from a mix of
+    the two hosts.
     """
-    assert normalize_url("https://www.example.com").origin == "https://www.example.com"
+    assert normalize_url("https://www.example.com").origin == "https://example.com"
     assert normalize_url("https://example.com").origin == "https://example.com"
     assert (
         normalize_url("https://www.example.com").origin
-        != normalize_url("https://example.com").origin
+        == normalize_url("https://example.com").origin
     )
+
+
+def test_the_registered_host_survives_on_url_even_when_the_origin_folds() -> None:
+    """The property that makes the fold safe: a site serving ONLY `www`, with no DNS record
+    on its apex, is still fetched at the host that answers."""
+    normalized = normalize_url("https://www.example.com/docs")
+
+    assert normalized.origin == "https://example.com"
+    assert normalized.url == "https://www.example.com/docs"
+
+
+def test_only_a_leading_www_label_is_stripped() -> None:
+    """Narrow on purpose. `www2` and `wwwx` are ordinary sub-domains that happen to start
+    with those letters, and no convention says they mirror their apex. `www.com` would leave
+    a bare TLD behind, which is not a site."""
+    assert normalize_url("https://www2.example.com").origin == "https://www2.example.com"
+    assert normalize_url("https://wwwx.example.com").origin == "https://wwwx.example.com"
+    assert normalize_url("https://www.com").origin == "https://www.com"
+    assert normalize_url("https://www.www.example.com").origin == "https://www.example.com"
 
 
 def test_the_submitted_url_is_preserved_verbatim_apart_from_trimming() -> None:

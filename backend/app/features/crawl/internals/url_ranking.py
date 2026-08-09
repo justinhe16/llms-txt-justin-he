@@ -438,13 +438,40 @@ def normalize_url(url: str) -> str | None:
     return None if candidate is None else candidate.url
 
 
+def strip_www(host: str) -> str:
+    """`www.example.com` -> `example.com`; every other host unchanged.
+
+    The crawl feature's copy of the rule `websites/internals/url_normalize.py` applies to
+    `websites.origin`, and a deliberate copy rather than an import: ARCHITECTURE.md §3.1
+    forbids a feature reaching into another feature's `internals/`, and this is four lines.
+    `tests/test_url_ranking.py` pins the two to the same table of cases so they cannot drift.
+
+    Narrow on purpose — only a leading `www.` label, and only when a dotted remainder is left.
+    `www2.example.com` and `wwwx.example.com` are ordinary sub-domains, and `www.com` would
+    leave a bare TLD.
+    """
+    if not host.startswith("www."):
+        return host
+    remainder = host[4:]
+    return remainder if "." in remainder else host
+
+
 def _origin(candidate: _NormalizedCandidate) -> tuple[str, str, int]:
-    """`(scheme, host, port)` with the port collapsed to the scheme's default — the same
-    equality `websites/internals/url_normalize.py`'s `NormalizedUrl.origin` already uses.
-    See the module docstring for why `"off_origin"` matches this definition specifically.
+    """`(scheme, host, port)` with the port collapsed to the scheme's default and a leading
+    `www.` collapsed away — the same equality `websites/internals/url_normalize.py`'s
+    `NormalizedUrl.origin` uses. See the module docstring for why `"off_origin"` matches that
+    definition specifically.
+
+    **The `www.` half is what makes an apex seed usable.** A site whose apex redirects to
+    `www` publishes a sitemap listing `www` URLs, so a seed of `https://example.com` measured
+    against a strict host equality drops every candidate its own sitemap offered — `"off_origin"`
+    rejecting the site's own pages. Observed on `anthropic.com`: 510 sitemap URLs discovered,
+    510 dropped, and the run fell back to scraping links off the seed for a third of the
+    coverage the `www` spelling got. Folding the prefix here keeps that rule doing the job it
+    exists for — keeping a crawl on ONE site — rather than splitting one site in half.
     """
     port = candidate.port if candidate.port is not None else _DEFAULT_PORTS[candidate.scheme]
-    return (candidate.scheme, candidate.host, port)
+    return (candidate.scheme, strip_www(candidate.host), port)
 
 
 def _segments(path: str) -> list[str]:

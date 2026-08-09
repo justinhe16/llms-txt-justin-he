@@ -75,10 +75,24 @@ from app.features.crawl.internals.fetcher import (
     fetch_page,
 )
 from app.features.crawl.internals.ssrf import Resolver
+from app.features.crawl.internals.url_ranking import strip_www
 from app.features.crawl.schemas import CrawledPage
 
 
 logger = logging.getLogger(__name__)
+
+
+def _same_site(left: str, right: str) -> bool:
+    """Whether two URLs are the same site, with a leading `www.` folded away.
+
+    The comparison half of `_origin_of` above, kept separate because the two must not be the
+    same function: this one folds `www`, and the value `seed_origin` displays must not. The
+    fold is what stops the most common configuration on the web from looking like an
+    off-origin redirect — a frontier URL on the apex answering from `www` has not left the
+    site. `strip_www` is `internals/url_ranking.py`'s, so the whole feature folds it the same
+    way (`websites/internals/url_normalize.py` applies the same rule to `websites.origin`).
+    """
+    return strip_www(urlsplit(left).netloc.lower()) == strip_www(urlsplit(right).netloc.lower())
 
 
 def _origin_of(url: str) -> str:
@@ -87,8 +101,14 @@ def _origin_of(url: str) -> str:
     Deliberately simpler than `internals/url_ranking.py`'s `_origin`, which collapses default
     ports because it compares URLs a sitemap wrote by hand against a seed a user typed. Both
     sides here are a `CrawledPage.url`, which `internals/fetcher.py` built from an already
-    normalized, already validated target, so the two spellings this would have to reconcile
+    normalized, already validated target, so the port spellings that function reconciles
     cannot both occur in one run.
+
+    **Does NOT fold a leading `www.`, deliberately** — that is `_same_site` below. This
+    function feeds two different needs and only one of them is a comparison: `seed_origin`
+    carries the host the run actually landed on, and `generate_llms_txt` prints it
+    ("an index of N pages from ..."). Folding it here would print an apex that appears in none
+    of the links underneath it.
     """
     parts = urlsplit(url)
     return f"{parts.scheme.lower()}://{parts.netloc.lower()}"
@@ -568,7 +588,7 @@ async def crawl_site(
         The SEED is deliberately not subject to this: a site that has moved wholesale should
         be crawled where it moved to, which is what `seed_origin` records.
         """
-        return _origin_of(page.url) != _origin_of(requested_url)
+        return not _same_site(page.url, requested_url)
 
     async def fetch_frontier_url(url: str) -> None:
         nonlocal pages_failed
