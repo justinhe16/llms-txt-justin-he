@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/table";
 import type { RunDetail } from "@/lib/api/runs";
 import {
+  blockedReasonCopy,
   discoverySourceCopy,
   fetchCapNote,
   PROVENANCE_BUDGET_LABEL,
@@ -72,7 +73,10 @@ import { EmptyCell } from "./empty-cell";
  * ranking selected, because the seed is fetched separately and is never a member of `selected`
  * (`lib/crawls/run-provenance.ts`'s invariants section). A funnel that silently widened at one
  * stage would read as a bug; one that widens by a segment labelled "Seed page" reads as what
- * happened.
+ * happened. `blocked` (`RUN_STATS_VERSION` 11) is grey, deliberately grouped with "lost here"
+ * rather than given rose alongside `failed` — a page a WAF challenged is not a failure of this
+ * crawler's own doing, the same "hitting a cap is a success" colouring `notAttempted` already
+ * gets (ARCHITECTURE.md §3.4).
  *
  * The bars themselves are `aria-hidden`: every number in them is also in the legend directly
  * underneath as text, so a screen reader gets the counts once rather than twice, and gets them
@@ -106,7 +110,10 @@ import { EmptyCell } from "./empty-cell";
  * stages its own partial `stats` describe, exactly as the ticket's own States section asks
  * ("show whatever stages completed before the failure"). One place `run.status === "failed"`
  * changes wording directly is the Fetch stage's closing sentence, which reports the run
- * failed rather than naming a cap that never actually ended it.
+ * failed rather than naming a cap that never actually ended it — or, when the failure was a
+ * detected WAF/CDN block on the run's own SEED (`RUN_STATS_VERSION` 11's `blocked_reason`),
+ * names THAT specifically ("This site returned an automated-traffic challenge...") rather than
+ * the generic sentence, since the block is exactly why fetching produced nothing.
  *
  * ## Why `<details>`/`<summary>` and not a `components/ui/` primitive
  *
@@ -180,6 +187,10 @@ const SEGMENT_FILL = {
   seed: "bg-chart-3",
   frontier: "bg-chart-1",
   failed: "bg-status-failed/45",
+  // Neutral, not rose — see the module docstring's "blocked" paragraph: a WAF-challenged page
+  // is not a failure this crawler committed, so it shares `dropped`/`notAttempted`'s grey
+  // rather than `failed`'s rose.
+  blocked: "bg-muted-foreground/25",
   notAttempted: "bg-muted-foreground/25",
   listed: "bg-chart-1",
   omittedEmpty: "bg-muted-foreground/25",
@@ -229,13 +240,19 @@ function funnelScale(stages: FunnelStage[]): number {
 }
 
 /** The `<summary>` line's micro-summary — "2 found · 3 fetched · 1 listed", with any part this
- * run never recorded left out rather than shown as a zero. */
+ * run never recorded left out rather than shown as a zero. `blocked` (`RUN_STATS_VERSION` 11)
+ * joins the line only when this run actually had one — a blocked SEED means `fetchedTotal` is
+ * already `0`, so the preview line for that run reads "0 found · 0 fetched · 1 blocked", never
+ * silently omitting the one fact that explains why fetching came up empty. */
 function funnelPreview(provenance: RunProvenance): string {
   const parts: string[] = [];
   if (provenance.urlsDiscovered !== null) {
     parts.push(`${provenance.urlsDiscovered.toLocaleString()} ${PROVENANCE_PREVIEW.found}`);
   }
   parts.push(`${fetchedTotal(provenance).toLocaleString()} ${PROVENANCE_PREVIEW.fetched}`);
+  if (provenance.fetch.blocked > 0) {
+    parts.push(`${provenance.fetch.blocked.toLocaleString()} ${PROVENANCE_PREVIEW.blocked}`);
+  }
   if (provenance.index.kind === "stored") {
     parts.push(`${provenance.index.indexed.toLocaleString()} ${PROVENANCE_PREVIEW.listed}`);
   }
@@ -326,19 +343,34 @@ function funnelStages(provenance: RunProvenance, status: RunDetail["status"]): F
         { key: "seed", value: fetch.seedFetched ? 1 : 0 },
         { key: "frontier", value: fetch.frontierFetched },
         { key: "failed", value: fetch.failed },
+        { key: "blocked", value: fetch.blocked },
         { key: "notAttempted", value: fetch.notAttempted },
       ],
       // A failed run names its failure rather than a cap that never actually ended it — a run
       // that died mid-fetch did not "finish before any budget ran out", which is what
       // `capHitCopy(null)` would have claimed. `fetchCapNote` is what rules out the OTHER way
-      // that same sentence goes wrong: a completed run whose page budget was spent at
+      // that same sentence goes wrong on a COMPLETED run: a run whose page budget was spent at
       // selection also reports `cap_hit: null`, and structurally always will — see that
-      // function's own docstring.
+      // function's own docstring. On a FAILED run, a detected WAF/CDN block on the SEED
+      // (`AccessBlockedError`, `internals/crawler.py`) names THAT specifically, ahead of the
+      // generic failure sentence — `fetch.blockedReason` is set on a failed run precisely when
+      // the block is what ended it, since `_note_block` runs before `seed_error` is even
+      // raised.
       note:
         status === "failed"
-          ? "This run failed before fetching finished."
+          ? fetch.blockedReason !== null
+            ? blockedReasonCopy(fetch.blockedReason).explanation
+            : "This run failed before fetching finished."
           : fetchCapNote(fetch.capHit, provenance.overLimit, fetch.failed),
-      detail: null,
+      // A completed run with one or more blocked FRONTIER pages gets one extra sentence
+      // explaining what "Blocked" in the legend means — the failed-run case above already
+      // says this as the stage's own `note`, so this only fires when the run did not fail.
+      detail:
+        status !== "failed" && fetch.blocked > 0 && fetch.blockedReason !== null ? (
+          <p className="mt-2 text-xs text-muted-foreground">
+            {blockedReasonCopy(fetch.blockedReason).explanation}
+          </p>
+        ) : null,
     },
     {
       key: "index",

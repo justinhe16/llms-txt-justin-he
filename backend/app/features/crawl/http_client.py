@@ -20,6 +20,18 @@ to find out what is fetching their pages and how to block it. A descriptive UA i
 courtesy this crawler can afford to extend and cannot afford to skip: it is one grep away
 from being the entire explanation a confused site owner gets."""
 
+CRAWL_BOT_NAME = CRAWL_USER_AGENT.split("/", 1)[0].split()[0].lower()
+"""The bare product token this crawler answers to — `"llms-text-bot"` — extracted from
+`CRAWL_USER_AGENT` above rather than written a second time, so the two cannot drift apart.
+The same derivation `internals/robots.py`'s private `_product_token` performs at `robots.txt`
+match time; that module needs a FUNCTION rather than this constant, because it has to derive
+a token from whatever `user_agent` string a caller (production or a test) hands it, not
+always this process's own. This is the plain string for the caller that only ever means THIS
+crawler's own token: `app.features.crawl.service`'s `_BLOCKED_MESSAGES` is that caller — the
+social escape hatch a detected WAF/CDN block degrades to ("ask the site operator to allowlist
+llms-text-bot") needs the crawler to be able to name itself in `runs.error`, and a hardcoded
+second copy of the literal is exactly the drift this constant exists to rule out."""
+
 
 def build_crawl_client(settings: Settings) -> httpx.AsyncClient:
     """Build the crawler's shared `httpx.AsyncClient`.

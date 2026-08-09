@@ -14,7 +14,12 @@ from pathlib import Path
 import httpx
 
 from app.core.settings import Settings
-from app.features.crawl.internals.crawler import CrawlLimits, RobotsDisallowedError, crawl_site
+from app.features.crawl.internals.crawler import (
+    AccessBlockedError,
+    CrawlLimits,
+    RobotsDisallowedError,
+    crawl_site,
+)
 from app.features.crawl.internals.fetcher import ByteBudget, PolitenessGate
 from app.features.crawl.internals.links import extract_links
 from app.features.crawl.internals.sitemap import SITEMAP_BYTE_SHARE, discover_sitemap_urls
@@ -763,6 +768,144 @@ async def test_an_injected_gate_is_used_instead_of_limits_politeness_delay() -> 
     frontier_starts = start_times[1:]
     assert len(frontier_starts) == 2
     assert frontier_starts[1] - frontier_starts[0] >= 0.045
+
+
+# -----------------------------------------------------------------------------------------
+# WAF-detection ticket: a blocked seed fails the run via `AccessBlockedError`; a blocked
+# frontier page is counted and left out of `pages`, and the crawl continues.
+# -----------------------------------------------------------------------------------------
+
+
+async def test_a_blocked_seed_is_never_appended_and_becomes_an_access_blocked_error() -> None:
+    """Mirrors `test_a_disallowed_seed_is_never_fetched_and_becomes_a_seed_error` above, one
+    layer downstream: the seed IS fetched (unlike a robots-disallowed one), but its response is
+    a detected challenge, so it is never appended to `pages` and the run has nothing to build
+    an artifact from."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, headers={"cf-mitigated": "challenge"}, text="blocked")
+
+    async with _client(handler) as client:
+        result = await crawl_site(
+            client, "https://seed.test/", limits=_limits(), resolver=_fake_resolver()
+        )
+
+    assert result.pages == []
+    assert isinstance(result.seed_error, AccessBlockedError)
+    assert result.seed_error.reason == "challenge"
+    assert result.cap_hit is None
+    assert result.stats["pages_blocked"] == 1
+    assert result.stats["blocked_reason"] == "challenge"
+
+
+async def test_a_blocked_seed_never_reaches_the_frontier_from_seed_callback() -> None:
+    """A blocked seed short-circuits before `frontier_from_seed` is ever consulted — the same
+    'the run is already a failure' reasoning `test_the_callback_is_never_called_when_the_seed_
+    fetch_fails` pins for an ordinary fetch failure, extended to a blocked one."""
+    called = False
+
+    def callback(page: CrawledPage) -> list[str]:
+        nonlocal called
+        called = True
+        return []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, text="Forbidden")
+
+    async with _client(handler) as client:
+        result = await crawl_site(
+            client,
+            "https://seed.test/",
+            limits=_limits(),
+            frontier_from_seed=callback,
+            resolver=_fake_resolver(),
+        )
+
+    assert called is False
+    assert result.pages == []
+    assert isinstance(result.seed_error, AccessBlockedError)
+    assert result.seed_error.reason == "denied"
+
+
+async def test_a_blocked_frontier_page_is_counted_and_left_out_of_pages_without_failing_the_run() -> (
+    None
+):
+    """[Non-seed blocked]. The seed lands cleanly; one of two frontier pages is blocked. The
+    run still completes as a success — `seed_error is None`, no cap tripped — with the blocked
+    page counted on `pages_blocked`/`blocked_reason` and excluded from `pages`, the same shape
+    a failed frontier fetch already has for `pages_failed`."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "seed" in _host(request):
+            return httpx.Response(200, text="ok")
+        if "blocked" in _host(request):
+            return httpx.Response(403, headers={"cf-mitigated": "challenge"}, text="blocked")
+        return httpx.Response(200, text="ok")
+
+    async with _client(handler) as client:
+        result = await crawl_site(
+            client,
+            "http://seed.test/",
+            limits=_limits(),
+            extra_urls=["http://blocked.test/", "http://ok.test/"],
+            resolver=_fake_resolver(),
+        )
+
+    assert result.seed_error is None
+    assert result.cap_hit is None
+    assert sorted(page.url for page in result.pages) == ["http://ok.test/", "http://seed.test/"]
+    assert result.stats["pages_crawled"] == 2
+    assert result.stats["pages_failed"] == 0
+    assert result.stats["pages_blocked"] == 1
+    assert result.stats["blocked_reason"] == "challenge"
+
+
+async def test_multiple_blocked_frontier_pages_fold_into_one_run_level_reason() -> None:
+    """`merge_block_reason`, exercised through the real concurrent loop rather than called
+    directly (`tests/test_crawl_blocked.py` already pins the pure function) — a `"denied"` page
+    and a `"challenge"` page in the same run's frontier fold to `"challenge"`, the higher-
+    ranked of the two, regardless of which of the two concurrent fetches happens to finish
+    first."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        host = _host(request)
+        if "seed" in host:
+            return httpx.Response(200, text="ok")
+        if "denied" in host:
+            return httpx.Response(401, text="Forbidden")
+        if "challenge" in host:
+            return httpx.Response(403, headers={"cf-mitigated": "challenge"}, text="blocked")
+        raise AssertionError(f"unexpected host: {host}")
+
+    async with _client(handler) as client:
+        result = await crawl_site(
+            client,
+            "http://seed.test/",
+            limits=_limits(),
+            extra_urls=["http://denied.test/", "http://challenge.test/"],
+            resolver=_fake_resolver(),
+        )
+
+    assert result.seed_error is None
+    assert [page.url for page in result.pages] == ["http://seed.test/"]
+    assert result.stats["pages_blocked"] == 2
+    assert result.stats["blocked_reason"] == "challenge"
+
+
+async def test_a_run_with_nothing_blocked_records_a_null_blocked_reason_and_zero_count() -> None:
+    """The 'real recorded value, not an absent key' baseline every other stats key in this
+    dict already holds — see `internals/run_stats.py`'s `RUN_STATS_VERSION` 11 paragraph."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="ok")
+
+    async with _client(handler) as client:
+        result = await crawl_site(
+            client, "https://seed.test/", limits=_limits(), resolver=_fake_resolver()
+        )
+
+    assert result.stats["pages_blocked"] == 0
+    assert result.stats["blocked_reason"] is None
 
 
 async def test_widening_a_gate_between_phases_applies_to_the_frontier() -> None:

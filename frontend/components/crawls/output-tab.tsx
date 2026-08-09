@@ -14,8 +14,10 @@ import {
 import type { RunDetail, RunListItem } from "@/lib/api/runs";
 import { isActiveRunStatus } from "@/lib/api/run-status";
 import { useRun } from "@/lib/query/use-run";
+import { blockedReasonCopy } from "@/lib/crawls/provenance-copy";
 import { rowStatusFromRunStatus } from "@/lib/crawls/row-status";
 import { selectRunToShow } from "@/lib/crawls/select-run";
+import { cn } from "@/lib/utils";
 
 import { CrawlProvenance } from "./crawl-provenance";
 import { CrawlsError } from "./crawls-error";
@@ -295,13 +297,25 @@ function RunArtifact({
   // State 3 of 4: the run failed. Show why — an empty viewer for a failed run is the
   // specific outcome this ticket's acceptance criteria rule out.
   if (run.status === "failed") {
+    // `stats.blocked_reason` (`RUN_STATS_VERSION` 11) is set on a failed run precisely when a
+    // detected WAF/CDN block on the SEED is what ended it (`internals/crawler.py`'s
+    // `_note_block` runs before `seed_error` is even raised) — a distinct case from an
+    // ordinary crawl failure. This is this crawler correctly detecting and stopping, not a
+    // bug or an outage, so it gets its own wording and a neutral surface instead of the rose
+    // "something went wrong" treatment every other failure reason still gets.
+    const blockedReason =
+      typeof run.stats?.blocked_reason === "string" ? run.stats.blocked_reason : null;
+    const blocked = blockedReason !== null ? blockedReasonCopy(blockedReason) : null;
+
     return (
       <div className="space-y-3 rounded-lg border border-border bg-card p-6">
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <RunStatusIndicator status="failed" />
             <span className="text-sm text-muted-foreground">
-              This run produced no llms.txt.
+              {blocked !== null
+                ? `This site blocked this crawler (${blocked.label.toLowerCase()}) before it could produce an llms.txt.`
+                : "This run produced no llms.txt."}
             </span>
           </div>
           <DownloadFullButton
@@ -310,7 +324,14 @@ function RunArtifact({
             disabledReason="This run failed before it could produce an llms-full.txt."
           />
         </div>
-        <pre className="max-h-64 overflow-auto rounded-md bg-status-failed-surface px-4 py-3 font-mono text-xs whitespace-pre-wrap break-words text-status-failed">
+        <pre
+          className={cn(
+            "max-h-64 overflow-auto rounded-md px-4 py-3 font-mono text-xs whitespace-pre-wrap break-words",
+            blocked !== null
+              ? "bg-muted text-foreground"
+              : "bg-status-failed-surface text-status-failed"
+          )}
+        >
           {run.error ?? "The run failed, but recorded no error message."}
         </pre>
       </div>

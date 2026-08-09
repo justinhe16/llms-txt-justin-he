@@ -381,6 +381,12 @@ export function stageUnit(unit: { one: string; other: string }, count: number | 
  * (`notAttempted` is "Not attempted", never "skipped" or "missed"), and every segment names a
  * fact the row actually recorded rather than one derived from a subtraction the panel hopes is
  * right.
+ *
+ * `blocked` (`RUN_STATS_VERSION` 11) follows the same rule as `notAttempted`: a page a WAF or
+ * CDN challenged is not a failure of this crawler's own doing, so the label names what
+ * happened rather than passing judgement — `crawl-provenance.tsx`'s `SEGMENT_FILL` colours it
+ * the same neutral grey `dropped`/`notAttempted`/`omittedEmpty` already use, never the rose
+ * `failed` gets.
  */
 export const PROVENANCE_SEGMENTS = {
   discovered: "Discovered",
@@ -389,10 +395,46 @@ export const PROVENANCE_SEGMENTS = {
   seed: "Seed page",
   frontier: "From the frontier",
   failed: "Failed",
+  blocked: "Blocked",
   notAttempted: "Not attempted",
   listed: "Listed in llms.txt",
   omittedEmpty: "Omitted as empty",
 } as const;
+
+/**
+ * `blocked_reason` (`internals/blocked.py`'s `BlockReason`) turned into a label and a
+ * plain-language explanation — the Fetch stage's own copy for the one new segment this
+ * ticket adds. Deliberately says what this crawler did NOT do (solve the challenge) as much
+ * as what the site did, mirroring `_BLOCKED_MESSAGES` on the backend
+ * (`app.features.crawl.service`) — a signed-in user reading either copy should come away with
+ * "this crawler detected and stopped," never "this crawler tried and failed."
+ */
+export const BLOCKED_REASON: Record<string, { label: string; explanation: string }> = {
+  challenge: {
+    label: "Challenge",
+    explanation:
+      "This page returned an automated-traffic challenge (for example, Cloudflare's managed challenge) that this crawler does not attempt to solve.",
+  },
+  denied: {
+    label: "Denied",
+    explanation:
+      "This page's server denied this crawler's request outright (401 or 403), with no challenge to solve.",
+  },
+};
+
+/**
+ * The degrade-to-key lookup `selectionRuleCopy` already sets the precedent for, applied to
+ * `BLOCKED_REASON`: a `blocked_reason` value this panel has no copy for yet renders the raw
+ * key with an explanation naming it directly, rather than a blank row or a thrown error.
+ */
+export function blockedReasonCopy(reason: string): { label: string; explanation: string } {
+  return (
+    BLOCKED_REASON[reason] ?? {
+      label: reason,
+      explanation: `This page was blocked ("${reason}").`,
+    }
+  );
+}
 
 /** The Fetch stage's byte total, labelled — the one number in this panel that is not a count of
  * URLs or pages, which is why it sits beside the funnel bar rather than in it. */
@@ -413,10 +455,12 @@ export const PROVENANCE_BUDGET_UNIT = { one: "page", other: "pages" } as const;
 
 /** The `<summary>` line's right-hand micro-summary, so a reader gets the shape of the run
  * without opening the panel. Rendered as "2 found · 3 fetched · 1 listed", omitting any part
- * this run did not record. */
+ * this run did not record — `blocked` joins the line only when `fetch.blocked > 0`, the same
+ * "omit rather than show a zero" rule the other three parts already follow. */
 export const PROVENANCE_PREVIEW = {
   found: "found",
   fetched: "fetched",
+  blocked: "blocked",
   listed: "listed",
 } as const;
 

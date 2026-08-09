@@ -105,7 +105,10 @@ from asyncpg import Pool
 from fastapi import HTTPException
 
 from app.core.settings import Settings
+from app.features.crawl.http_client import CRAWL_BOT_NAME
+from app.features.crawl.internals.blocked import BlockReason
 from app.features.crawl.internals.crawler import (
+    AccessBlockedError,
     CrawlLimits,
     CrawlResult,
     RobotsDisallowedError,
@@ -179,6 +182,25 @@ _MAX_ERROR_LENGTH: Final = 500
 # redeployed underneath it would be a lie they could act on.
 _CANCELLED_MESSAGE: Final = "The run was interrupted before it could finish."
 
+# The two fixed, safe-to-display strings `_safe_error_message` maps an `AccessBlockedError`'s
+# `.reason` to, keyed by `internals/blocked.py`'s own `BlockReason` vocabulary so a typo in
+# either key is a `KeyError` in this module's own tests rather than a silently missing branch.
+# Both name what THIS crawler did (stopped, rather than tried to get past it) alongside what
+# the site did, because "detect and stop, not detect and defeat" is a fact a user reading
+# `runs.error` should be able to see, not just a rule this codebase follows silently.
+_BLOCKED_MESSAGES: Final[dict[BlockReason, str]] = {
+    "challenge": (
+        "This site returned an automated-traffic challenge (such as Cloudflare's managed "
+        f"challenge) that this crawler ({CRAWL_BOT_NAME}) does not attempt to solve. If you "
+        f"manage this site, allowlisting {CRAWL_BOT_NAME} will let this crawler through."
+    ),
+    "denied": (
+        f"This site denied this crawler's request ({CRAWL_BOT_NAME}, 401 or 403), with no "
+        f"challenge to solve. If you manage this site, allowlisting {CRAWL_BOT_NAME} will let "
+        "this crawler through."
+    ),
+}
+
 
 class TransientCrawlError(Exception):
     """Raised by `CrawlService.execute_run` when this attempt failed transiently and the run
@@ -234,7 +256,7 @@ def _is_retryable(exc: Exception) -> bool:
 
     **Retryable** is the narrow, enumerated set above: the network was uncooperative, or
     Storage was. **Permanent** is everything else, and the defaulting direction is the whole
-    point of the function. Three of the failures this crawler can actually produce are
+    point of the function. Four of the failures this crawler can actually produce are
     permanent by construction and would be pure latency to retry:
 
     * `SsrfBlockedError` — the URL resolves somewhere it is not allowed to. It will resolve
@@ -245,6 +267,12 @@ def _is_retryable(exc: Exception) -> bool:
     * `RobotsDisallowedError` (PER-191) — the site's own `robots.txt` disallows the seed URL.
       It will still be disallowed in sixty seconds; nothing about waiting changes what an
       operator's own policy file says.
+    * `AccessBlockedError` — the seed's own response was a detected WAF/CDN challenge or
+      denial (`internals/blocked.py`'s `classify_block`). A managed challenge is deterministic
+      for a non-browser client and carries no `Retry-After`; retrying gets the identical
+      block, indefinitely, for the same reason `SsrfBlockedError` above does. This crawler
+      does not solve the challenge to make a retry meaningful — see that exception's own
+      docstring (`internals/crawler.py`) and ARCHITECTURE.md §11.
 
     An exception this function has never heard of is treated as permanent too. That is the
     conservative choice in the direction that matters: an unrecognized exception is far more
@@ -254,13 +282,21 @@ def _is_retryable(exc: Exception) -> bool:
     once when it might have succeeded on a second try; the cost of the other direction is
     every bug in the crawl path becoming a five-minute-slow bug.
 
-    **A 4xx or 5xx from the target site is not on either list, because it is not an exception
-    here at all.** `internals/fetcher.py` returns a `CrawledPage` carrying `status` rather
-    than raising for a non-2xx response, so "404 on the seed URL" and "5xx from the target
-    site" — which the ticket classifies as permanent and retryable respectively — currently
-    reach this service as a *successful* crawl of a page. Turning them into failures at all
-    is a crawler-pipeline decision, and that milestone is not designed (CLAUDE.md #9,
-    ARCHITECTURE.md §3.4). When it is, the classification belongs here, in this function.
+    **A 4xx or 5xx from the target site is still not on either list for its own sake, because
+    it is still not an exception here at all — with exactly one, narrow carve-out.**
+    `internals/fetcher.py` returns a `CrawledPage` carrying `status` rather than raising for a
+    non-2xx response, so an ordinary "404 on the seed URL" or "500 from the target site"
+    still reaches this service as a *successful* crawl of a page, and turning those into
+    failures in general remains an undesigned crawler-pipeline decision (CLAUDE.md #9,
+    ARCHITECTURE.md §3.4). The one status-derived exception that DOES now exist,
+    `AccessBlockedError` above, is deliberately not that general decision: it is raised only
+    for the narrow, specifically-classified subset of responses `internals/blocked.py`'s
+    `classify_block` recognizes as a detected WAF/CDN challenge or denial — never for an
+    ordinary 4xx/5xx `classify_block` declines to classify — and only ever for the SEED;
+    `internals/crawler.py`'s frontier loop counts a blocked FRONTIER page and keeps going,
+    never raising anything for it. A future ticket that wants to fail runs on ordinary 404s
+    or 500s still has that whole decision ahead of it; this one answers a narrower question
+    that was never "should a bad status code fail a run" in general.
     """
     return isinstance(exc, _RETRYABLE_EXCEPTIONS)
 
@@ -305,6 +341,12 @@ def _safe_error_message(exc: Exception) -> str:
         message = "Could not store this run's output."
     elif isinstance(exc, RobotsDisallowedError):
         message = "This site's robots.txt disallows crawling this URL."
+    elif isinstance(exc, AccessBlockedError):
+        # `.reason` is this codebase's own `BlockReason` — a `Literal["challenge", "denied"]`
+        # — never `str(exc)`, for the same reason every other branch here avoids it: the
+        # fixed strings in `_BLOCKED_MESSAGES` are written for a signed-in user to read, and
+        # `AccessBlockedError.__str__` is written for a developer reading `fly logs`.
+        message = _BLOCKED_MESSAGES[exc.reason]
     elif isinstance(exc, httpx.TimeoutException | TimeoutError):
         # Both spellings, because two different layers time a crawl out and they do not
         # share a base class: httpx raises `httpx.TimeoutException` when one request exceeds
@@ -648,12 +690,19 @@ class CrawlService:
                 # ordinary outcome of crawling the internet, not an incident. It goes through
                 # the same `_finish_failed_attempt` as an unexpected exception because the
                 # retry decision is identical — only the log line differs. A disallowed seed
-                # (PER-191) gets its OWN line, without `exc_info` — there is no traceback
-                # worth a stack, just a site's own policy file saying no.
+                # (PER-191) and a blocked seed (this ticket) each get their OWN line, without
+                # `exc_info` — there is no traceback worth a stack for either: one is a site's
+                # own policy file saying no, the other is a WAF's own response saying so.
                 if isinstance(result.seed_error, RobotsDisallowedError):
                     logger.warning(
                         "crawl: robots.txt disallows the seed URL; not crawling",
                         extra={"url": website.url},
+                    )
+                elif isinstance(result.seed_error, AccessBlockedError):
+                    logger.warning(
+                        "crawl: seed URL returned a detected %s; not crawling",
+                        result.seed_error.reason,
+                        extra={"url": website.url, "blocked_reason": result.seed_error.reason},
                     )
                 else:
                     logger.warning(

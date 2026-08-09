@@ -264,6 +264,30 @@ async def test_an_ssrf_rejection_fails_immediately_without_consuming_retries(
     assert not error.startswith("Failed after")
 
 
+async def test_a_blocked_seed_fails_immediately_without_consuming_retries(
+    websites_db: Pool,
+) -> None:
+    """The WAF/CDN counterpart to the SSRF classification test above. A seed that returns a
+    detected challenge or denial will return the identical answer in ten seconds and in
+    sixty — there is no `Retry-After` and no state that changes between attempts — so
+    retrying is five minutes of latency for a guaranteed identical outcome
+    (`AccessBlockedError`'s own docstring, `internals/crawler.py`)."""
+    run_id = await _seed(websites_db, "blocked-seed")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, headers={"cf-mitigated": "challenge"}, text="blocked")
+
+    assert await _run_task(websites_db, run_id, handler) == "no outcome"
+
+    row = await _row(websites_db, run_id)
+    assert row["status"] == "failed"
+    assert row["attempts"] == 1, "a permanent failure must not burn the retry budget"
+    assert row["completed_at"] is not None
+    error = row["error"]
+    assert isinstance(error, str) and error
+    assert not error.startswith("Failed after")
+
+
 async def test_an_unrecognized_exception_is_treated_as_permanent(
     websites_db: Pool, monkeypatch: pytest.MonkeyPatch
 ) -> None:

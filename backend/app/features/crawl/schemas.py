@@ -137,6 +137,44 @@ class CrawledPage:
     Appended at the end of this dataclass alongside `description` and `markdown`, for the
     same positional-construction reason `description`'s own docstring gives."""
 
+    blocked_reason: str | None
+    """Whether this page's response looks like a WAF/CDN access challenge or an outright
+    denial rather than the page it was asked for — `internals/blocked.py`'s `classify_block`,
+    called by `internals/fetcher.py`'s `fetch_page` on every response, copied straight across
+    exactly as `description`/`markdown`/`is_empty` above are. One of `"challenge"`
+    (an interactive challenge this crawler does not attempt to solve — Cloudflare's managed
+    challenge is the one this feature has actually met) or `"denied"` (a flat `401`/`403` with
+    no challenge markers — HTTP basic auth, an IP allowlist, or an unconditional WAF rule), or
+    `None` for an ordinary response, blocked or not in the everyday sense of that word: a `404`
+    is not a block, and neither is a `429` or a bare `503` — see that module's own docstring
+    for the full rule set.
+
+    Typed `str | None`, not `internals.blocked.BlockReason | None` — `schemas.py` has no
+    router and imports nothing else from `internals/` (this file's own module docstring), and
+    keeping that true is worth a slightly looser type here for the same reason
+    `RunDiscoverySource` in `service.py` exists as its own `Literal` rather than being imported
+    onto this dataclass: the vocabulary is owned by `internals/blocked.py`, not restated as an
+    import a table-free, router-free schema module would otherwise never need.
+
+    **Exactly two things branch on it, and both are downstream of the seam, matching the rule
+    `is_empty` already sets (ARCHITECTURE.md §3.4).** `internals/crawler.py`'s `crawl_site`
+    reads it on the SEED to decide whether the run has anything to build an artifact from at
+    all — a blocked seed becomes `AccessBlockedError`, the seed is never appended to `pages`,
+    and the run fails outright, mirroring `RobotsDisallowedError`'s own "this site said no"
+    wiring. On a FRONTIER page it is counted (`runs.stats["pages_blocked"]`,
+    `["blocked_reason"]`) and the page is left out of `pages` — a Cloudflare challenge shell
+    has nothing this run's artifact should list — but the crawl continues; a WAF blocking a
+    handful of a site's pages is not a reason to discard everything else in reach, the same
+    "hitting a cap is a success" reasoning §3.4 already applies to the six crawl caps. Nothing
+    UPSTREAM of either check — sitemap discovery, URL ranking, the politeness gate — reads this
+    field or the response facts it is derived from.
+
+    Required, not defaulted, appended LAST after `is_empty` for the identical
+    positional-construction reason every field above states for itself: a caller that forgot
+    to wire `classify_block` through gets a `TypeError` at the one call site
+    (`internals/fetcher.py`'s `fetch_page`) that constructs a `CrawledPage`, not a
+    `CrawledPage` that silently claims every response passed through clean."""
+
 
 @dataclass(frozen=True, slots=True)
 class CrawlOutcome:

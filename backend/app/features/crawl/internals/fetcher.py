@@ -17,14 +17,18 @@ that makes a single "fetch this URL" safe and boundable lives here:
   kept — a response is never pulled entirely into memory before its size is known, so a
   hostile multi-gigabyte body is stopped as it arrives, not after.
 
-This module now has one opinion about a page's content, and one only: whether the response
-looks like HTML, and if so what `internals/extract.py` makes of it — a title, a description,
-a markdown body, and whether that body counts as empty. That parse happens here, inline with
-the one fetch this module already makes, rather than as a second pass over `CrawledPage`
-later, so a page is only ever decoded and read once. This module still has no opinion about
-concurrency, deadlines, or the page cap — those remain the crawl loop's job
-(`internals/crawler.py`). It fetches exactly one URL, following its own redirects, and
-returns exactly one `CrawledPage` or raises.
+This module now has two opinions about a page's content, not one: whether the response looks
+like HTML, and if so what `internals/extract.py` makes of it — a title, a description, a
+markdown body, and whether that body counts as empty — and, independently, whether the
+response looks like a WAF/CDN access challenge or an outright denial rather than the page it
+was asked for, `internals/blocked.py`'s `classify_block`. Both run here, inline with the one
+fetch this module already makes, rather than as a second pass over `CrawledPage` later, so a
+page is only ever decoded and read once. This module still has no opinion about concurrency,
+deadlines, or the page cap — those remain the crawl loop's job (`internals/crawler.py`). It
+fetches exactly one URL, following its own redirects, and returns exactly one `CrawledPage`
+or raises — a blocked response is a SUCCESSFUL fetch, never a raise, exactly as a `404` has
+always been: `internals/crawler.py` is what decides what a blocked `CrawledPage` means for
+the run, this module only reports the fact.
 """
 
 import asyncio
@@ -36,6 +40,7 @@ from urllib.parse import urljoin, urlsplit
 
 import httpx
 
+from app.features.crawl.internals.blocked import classify_block
 from app.features.crawl.internals.extract import ExtractedContent, extract_content
 from app.features.crawl.internals.ssrf import Resolver, ValidatedTarget, validate_url
 from app.features.crawl.schemas import CrawledPage
@@ -280,9 +285,15 @@ async def fetch_page(
         `description`, `markdown`, and `is_empty` come from `internals/extract.py`'s
         `extract_content` when the response's `Content-Type` looks like HTML (see
         `_looks_like_html`); for anything else those four are, respectively, `None`, `None`,
-        `""`, and `True`, and the extractor is never called. Either way this is a
-        SUCCESSFUL fetch — a page that fails to extract, or was never HTML in the first
-        place, is not a failed fetch, only a page with nothing to show for the parse.
+        `""`, and `True`, and the extractor is never called. `blocked_reason` comes from
+        `internals/blocked.py`'s `classify_block`, called on every response REGARDLESS of
+        `Content-Type` — a challenge or denial page is not always served as HTML, and
+        `classify_block` never raises, so there is no cost to calling it unconditionally the
+        way there is for the HTML-gated extractor. Either way this is a SUCCESSFUL fetch — a
+        page that fails to extract, was never HTML in the first place, or was blocked by a
+        WAF, is not a failed fetch, only a page with nothing (or nothing genuine) to show for
+        the parse; a non-2xx status alone has never raised here, and a blocked response does
+        not change that.
 
     Raises:
         SsrfBlockedError: `url`, or a `Location` it redirected to, failed validation.
@@ -341,6 +352,13 @@ async def fetch_page(
 
             content, content_bytes = await _read_body_within_budget(response, budget)
 
+            # Called unconditionally, regardless of `Content-Type` — a challenge or denial
+            # page is not always served as HTML (a bare 403 with a plain-text body is a
+            # `"denied"` response `_looks_like_html` might route either way), and
+            # `classify_block` never raises, so there is nothing this call needs to be gated
+            # behind the way the extractor below is gated behind `_looks_like_html`.
+            blocked_reason = classify_block(response.status_code, response.headers, content)
+
             if _looks_like_html(response):
                 extracted = extract_content(content, url=target.url)
             else:
@@ -395,6 +413,7 @@ async def fetch_page(
                 description=extracted.description,
                 markdown=extracted.markdown,
                 is_empty=extracted.is_empty,
+                blocked_reason=blocked_reason,
             )
 
     raise FetchError(f"exceeded {MAX_REDIRECTS} redirects")

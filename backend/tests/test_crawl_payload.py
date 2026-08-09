@@ -37,6 +37,7 @@ def _page(
         description=description,
         markdown=markdown,
         is_empty=is_empty,
+        blocked_reason=None,
     )
 
 

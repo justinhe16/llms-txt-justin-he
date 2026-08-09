@@ -683,9 +683,10 @@ its old key names rather than degrading to `diff_state: "not_recorded"`.
 **The bounded execution shell around that seam** lives in `backend/app/features/crawl/`,
 which owns no table and therefore holds no reader/writer pair — a feature with private,
 table-free I/O to do may keep it in `internals/` anyway, as this one keeps `ssrf.py`,
-`fetcher.py`, `crawler.py`, `sitemap.py`, and `enrich.py`. Every fetch, seed or redirect or a
-discovery document, passes `internals/ssrf.py`'s SSRF guard before a socket opens, and the
-crawl loop (`internals/crawler.py`) runs under six hard caps read from `Settings` — page count,
+`fetcher.py`, `crawler.py`, `sitemap.py`, `enrich.py`, and, as of the WAF-detection ticket
+below, `blocked.py`. Every fetch, seed or redirect or a discovery document, passes
+`internals/ssrf.py`'s SSRF guard before a socket opens, and the crawl loop
+(`internals/crawler.py`) runs under six hard caps read from `Settings` — page count,
 wall-clock budget, total response bytes, per-request timeout, concurrency, and a politeness
 delay between request starts. **That politeness delay is now `max(configured, clamped
 Crawl-delay)`, as of PER-191** — `internals/robots.py`'s `effective_crawl_delay_ms` — and
@@ -693,8 +694,9 @@ every fetch this feature makes, discovery's included, passes through the run's o
 `PolitenessGate` (`internals/fetcher.py`) rather than each phase enforcing its own. Hitting one
 of those caps ends the crawl with whatever pages it already collected and is a **success**,
 not a failure; only the seed itself failing to fetch is treated as one — which now includes a
-seed `robots.txt` disallows, `RobotsDisallowedError`, exactly as deliberately as a genuine
-fetch failure is, because a run with no pages at all has nothing to build an artifact from.
+seed `robots.txt` disallows (`RobotsDisallowedError`) and, as of the same ticket, a seed a
+WAF or CDN blocks (`AccessBlockedError`, below), exactly as deliberately as a genuine fetch
+failure is, because a run with no pages at all has nothing to build an artifact from.
 Sitemap discovery is bounded the same way and fails the same way it succeeds: it spends from
 the SAME `ByteBudget` the page crawl does, under a fixed share of it, so `stats["cap_hit"] ==
 "bytes"` and `stats["bytes_fetched"]` stay honest about the one run-wide counter both phases
@@ -704,6 +706,38 @@ cap is a success" rule as the crawl loop's own six caps, one level earlier. The 
 panel's own `cap_hit` wording is bound by this same rule (PER-196): its Fetch stage reads
 "Ended on the page cap — the run fetched as many pages as its budget allows," never "stopped
 short" or a failure colour, for a `cap_hit` of `"pages"`, `"bytes"`, or `"wall_clock"` alike.
+
+**A detected WAF/CDN challenge or denial is honoured, never defeated — the crawler's other
+"this site said no."** Before this ticket, a site behind a managed challenge (Cloudflare's is
+the one this crawler has actually met) reported a false success: the seed's JavaScript-shell
+response yielded no extractable content, `is_empty` was `True`, `generate_llms_txt` omitted
+it from the index for that reason, and the run "completed" with an artifact reading "Excludes
+1 page with no extractable content" — a sentence that is true of a genuinely thin page and
+false of a page the site never actually served. `internals/blocked.py`'s `classify_block(status,
+headers, body) -> BlockReason | None` — pure, never raises, the same category `robots.py` and
+`links.py` are in — reads a response's status, headers, and (bounded) body and returns
+`"challenge"`, `"denied"`, or `None`; `internals/fetcher.py`'s `fetch_page` calls it
+unconditionally on every response (`CrawledPage.blocked_reason`, appended last after
+`is_empty` for the identical positional-construction reason that field documents for itself),
+and `internals/crawler.py` is the only module that acts on the result. A blocked **seed**
+becomes `AccessBlockedError` — raised before `pages.append`, exactly as `RobotsDisallowedError`
+is for a disallowed one — so `pages_crawled` stays `0`, `frontier_from_seed` is never called,
+and `generate_llms_txt` is never reached at all: the false "excludes N pages" sentence is
+structurally impossible because there is no artifact to generate. A blocked **frontier** page
+does not fail the run: `internals/crawler.py`'s `_note_block` counts it and it is left out of
+`CrawlResult.pages`, and the crawl continues — the "hitting a cap is a success" rule two
+paragraphs up, applied to a WAF blocking a handful of a site's pages rather than to a byte or
+page count. Both are recorded on every row from `RUN_STATS_VERSION` 11 onward:
+`runs.stats["pages_blocked"]` (how many fetched pages, seed included, were blocked) and
+`["blocked_reason"]` (`"challenge"` | `"denied"` | `null`, folded across every blocked page by
+`internals/blocked.py`'s order-independent `merge_block_reason` — frontier fetches race under
+`asyncio.gather`, so a "first observed" merge would make the stored value depend on scheduling
+jitter rather than on the run itself). Both keys are exposed on every read endpoint, not
+stripped the way `content_hashes` is — a signed-in user watching a run is exactly who needs to
+know their crawl met a WAF. **This module detects a block and stops; it never attempts to get
+past one.** No challenge-solving, no headless rendering, no `User-Agent` spoofing or rotation,
+no cookie replay, no proxying — see §11's own bullet for the boundary stated as a standing
+rule rather than as a description of what this ticket happened to build.
 
 ### 3.5 The database infrastructure layer
 
@@ -1767,6 +1801,17 @@ Deliberately not decided here, and not to be decided by accident in an implement
   `Crawl-delay` allows. Whether such an override should ever exist, and what it would mean for
   a user to explicitly consent to ignoring a site's own policy file, is undesigned and needs
   its own ticket rather than a flag added quietly beside this one.
+- **Defeating a detected WAF/CDN challenge or denial — a standing rule, not a description of
+  what one ticket happened to build.** `internals/blocked.py` (§3.4) detects a Cloudflare-style
+  managed challenge or a flat access denial and stops; it does not, and no future ticket may
+  quietly teach it to, solve an interactive challenge, render JavaScript, spoof or rotate the
+  crawler's `User-Agent`, replay cookies to pass a challenge, or route a fetch through a proxy
+  to get around a block. A WAF or CDN saying no is a "no" this crawler honours, on the same
+  footing `robots.txt`'s `Disallow` already has (the bullet immediately above) — and unlike
+  that bullet, there is no hypothetical future ticket this one is deferring to: the user's own
+  escape hatch is asking the site operator to allowlist `llms-text-bot/0.1`
+  (`app.features.crawl.http_client.CRAWL_USER_AGENT`), and building a technical one instead is
+  out of scope permanently, not merely undesigned.
 - **Cleaning up orphaned Storage objects.** `CrawlService.execute_run` uploads a run's
   payload to Storage before `RunService.record_success` writes the row that names it (§5.1),
   and deleting a website cascades its `runs` rows but never touches Storage (§6.4) — both are

@@ -22,17 +22,21 @@ def test_run_stats_version_is_pinned() -> None:
     shape — the per-rule selection breakdown (`SelectionResult.dropped`) the Output tab's
     provenance panel renders. PER-201 bumped it a fifth time, from 9 to 10, when `max_pages`
     joined the shape — the run's own page budget, and the only key here that records a
-    CONFIGURED ceiling rather than something the run measured. See `RUN_STATS_VERSION`'s own
-    docstring for the full history, including why every one of those ten keys is a real,
-    recorded value on every row from the version that added it onward — `llms_txt_bytes: 0`,
-    `index_diff: None`, `enrich_unavailable_reason: None`, and `dropped: {}` included — rather
-    than an absent key or "not yet computed."
+    CONFIGURED ceiling rather than something the run measured. This repo's own WAF-detection
+    ticket bumped it a sixth time, from 10 to 11, when `pages_blocked` and `blocked_reason`
+    joined the shape — how many of a run's fetched pages, seed included, came back as a
+    detected WAF/CDN challenge or an outright denial, and which kind. See `RUN_STATS_VERSION`'s
+    own docstring for the full history, including why every one of those eleven keys is a
+    real, recorded value on every row from the version that added it onward —
+    `llms_txt_bytes: 0`, `index_diff: None`, `enrich_unavailable_reason: None`, `dropped: {}`,
+    `max_pages` set to the run's own configured budget, `pages_blocked: 0`, and
+    `blocked_reason: None` included — rather than an absent key or "not yet computed."
 
     Pinned here, directly, so a future change to the persisted shape has to bump this constant
     deliberately rather than by accident: `tests/test_run_persistence.py` only checks the
     version NUMBER a live row lands with, which would pass just as happily against a
     `RUN_STATS_VERSION` that was bumped again without anyone noticing this test existed."""
-    assert RUN_STATS_VERSION == 10
+    assert RUN_STATS_VERSION == 11
 
 
 def test_build_run_stats_passes_crawl_stats_through_unchanged_and_adds_twenty_keys() -> None:

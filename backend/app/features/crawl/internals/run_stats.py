@@ -47,7 +47,7 @@ from typing import Any, Final
 
 logger = logging.getLogger(__name__)
 
-RUN_STATS_VERSION: Final = 10
+RUN_STATS_VERSION: Final = 11
 """Which definition of this whole dict's shape a stored row was written under — not just
 `links_emitted`'s meaning, but which KEYS a row of this version even has.
 
@@ -321,7 +321,69 @@ budget is what lets a reader tell that run apart from one that genuinely had roo
 Why 10 and not folded into 9: PER-196 is already merged and writing version-9 rows — the same
 argument versions 4, 6, 7, 8 and 9 each make for themselves, now for a sixth time.
 
-Every version-9 key keeps its version-9 meaning here."""
+Every version-9 key keeps its version-9 meaning here.
+
+**Version 11** rows add two keys and redefine nothing (this repo's WAF-detection ticket,
+"report blocked crawls instead of claiming no extractable content"): `pages_blocked` and
+`blocked_reason` describe how many of this run's fetched pages — the SEED included — came
+back as a detected access challenge or an outright denial rather than the page they were
+asked for, and which kind. `blocked_reason` is one of `"challenge"` (an interactive WAF/CDN
+challenge this crawler does not attempt to solve — Cloudflare's managed challenge is the one
+this feature has actually met) or `"denied"` (a bare `401`/`403` with no challenge markers —
+HTTP basic auth, an IP allowlist, or an unconditional WAF rule), or `null` when nothing this
+run fetched was blocked. Both are `internals/blocked.py`'s vocabulary, classified per response
+by `classify_block` and folded across every blocked page this run saw by
+`merge_block_reason` — see that module's own docstring for the full rule set and for why the
+fold has to be order-independent (frontier fetches race under `asyncio.gather`, and a
+"whichever page happened to finish first" merge would make this run-level value depend on
+scheduling jitter rather than on the run itself).
+
+**Unlike every one of this file's ten earlier bumps, this one adds NO new keyword argument to
+`build_run_stats` at all.** `pages_blocked` and `blocked_reason` are computed entirely inside
+the crawl loop — `internals/crawler.py`'s `_note_block`, called on the seed and on every
+frontier fetch alike — because the crawl loop is the only code in this feature that saw every
+response's status and headers as it arrived; by the time `CrawlService.execute_run` calls
+`build_run_stats`, both numbers are already sitting on `CrawlResult.stats` beside
+`pages_crawled` and `pages_failed`, and pass through the `**crawl_stats` spread at the top of
+`build_run_stats`'s own `stats = {...}` literal completely unchanged. This is exactly the
+category `CrawlResult.stats`'s own docstring (`internals/crawler.py`) already describes for
+`pages_empty_content`: a fact about the FETCH, not a persistence-shaped concern this module
+computes, so there is nothing for this function's signature to gain by naming either one a
+second time.
+
+**Detecting a block is not defeating one, and this ticket does not add the machinery that
+would defeat one.** This crawler does not solve interactive challenges, render JavaScript,
+spoof or rotate its `User-Agent`, replay cookies to pass a challenge, or route a fetch through
+a proxy to get past a block — ARCHITECTURE.md §11 records that boundary by name. A blocked
+SEED fails the run outright, via `internals/crawler.py`'s `AccessBlockedError`
+(`app.features.crawl.service`'s `_is_retryable` treats it as permanent, mirroring
+`RobotsDisallowedError`'s own "this site said no" wiring) — there is nothing to build an
+artifact from, and a run that silently "completed" over a WAF challenge page's JavaScript
+shell, describing the zero pages it excluded as pages with "no extractable content," is
+exactly the false claim that motivated this ticket. A blocked FRONTIER page does NOT fail the
+run: it is counted here, left out of `CrawlResult.pages` (an interactive-challenge shell has
+nothing this run's artifact should list), and the crawl continues — the same "hitting a cap
+is a success" reasoning ARCHITECTURE.md §3.4 already applies to the six numeric crawl caps,
+applied here to a WAF blocking a handful of a site's pages rather than to a byte or page
+count.
+
+`pages_blocked` is `0` on every run where nothing was blocked, a real recorded value in
+exactly the sense every other zero in this dict is (version 5's own paragraph states the rule
+this repeats). `blocked_reason` is `null` under the identical circumstance, matching
+`index_diff`'s own "absence is recorded as JSON `null`, never a missing key" discipline
+(version 7's paragraph) rather than `enrich_unavailable_reason`'s narrower "`null` on every
+row where it does not apply" one — the distinction does not matter here because both fields
+land in the SAME dict on the SAME call, so there is no row where one is present and the other
+is not.
+
+**Both keys are EXPOSED, not worker-only.** Unlike `content_hashes` (version 8),
+`runs/service.py`'s `_public_stats` does not strip either one: a signed-in user watching a
+run fail (or complete with a handful of pages missing) is exactly who needs to know their
+crawl met a WAF, and there is no per-page detail on either key for `_public_stats` to have a
+reason to redact — both are aggregate counts across the whole run, the same shape
+`pages_empty_content` already is.
+
+Every version-10 key keeps its version-10 meaning here."""
 
 
 def build_run_stats(
@@ -369,11 +431,13 @@ def build_run_stats(
 
     Args:
         crawl_stats: `CrawlResult.stats` — `pages_crawled`, `pages_failed`, `bytes_fetched`,
-            `duration_ms`, `cap_hit`, and `pages_empty_content`. Passed through unchanged and
-            unre-derived: in particular, `cap_hit` is never recomputed here. The crawl loop is
-            the only code that knows which cap (if any) actually stopped a run — recomputing
-            that downstream from partial information would risk disagreeing with the very
-            component that decided it.
+            `duration_ms`, `cap_hit`, `pages_empty_content`, `pages_blocked`, and
+            `blocked_reason` (the last two, `RUN_STATS_VERSION` 11). Passed through unchanged
+            and unre-derived: in particular, `cap_hit` is never recomputed here, and neither
+            `pages_blocked` nor `blocked_reason` is — the crawl loop is the only code that
+            knows which cap (if any) actually stopped a run, or which responses it saw were
+            blocked and how, and recomputing either downstream from partial information would
+            risk disagreeing with the very component that decided it.
         links_emitted: The number of links the generated `llms.txt` artifact lists —
             `internals/llms_txt.py`'s `count_indexed_pages`, and nothing a caller derived for
             itself. **This diverged from `crawl_stats["pages_crawled"]` in PER-179**, exactly

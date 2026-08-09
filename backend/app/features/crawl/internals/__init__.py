@@ -27,15 +27,23 @@ page's HTML parsed into a title, a description, and a markdown body), `llms_txt.
 (`generate_llms_txt` and `generate_llms_full_txt`, the two artifacts a run publishes, plus
 the two counts `runs.stats` records about them — ARCHITECTURE.md §3.4), `url_ranking.py`
 (`select_urls`, a list of discovered URLs ranked and cut down to the ones worth spending a
-run's page budget on), and `robots.py` (`parse_robots`, one `robots.txt` body turned into the
+run's page budget on), `robots.py` (`parse_robots`, one `robots.txt` body turned into the
 `Disallow`/`Allow`/`Crawl-delay` rules `select_urls` and `crawl_site` enforce, and
-`effective_crawl_delay_ms`, PER-191). `extract.py` is called by `fetcher.py`, once per
-fetched page that looks like HTML (PER-177). `url_ranking.py` is called by `service.py`, over
-whatever `sitemap.py` discovers, to build `crawl_site`'s `extra_urls` (PER-176). `robots.py`'s
-`parse_robots` is called only by `sitemap.py`, over the one `robots.txt` fetch a run makes;
-`url_ranking.py` imports `RobotsRules` only for its `select_urls(..., robots=...)` parameter's
-type, and calls the `RobotsRules.is_allowed` method on whatever `sitemap.py` already parsed —
-neither module, nor `fetcher.py` or `crawler.py`, ever parses a `robots.txt` body itself.
+`effective_crawl_delay_ms`, PER-191), and `blocked.py` (`classify_block`, one fetched
+response's status, headers, and body turned into a `BlockReason | None` — a detected WAF/CDN
+challenge or denial — and `merge_block_reason`, the order-independent fold `crawler.py` uses
+to combine several such reasons into one run-level answer). `extract.py` is called by
+`fetcher.py`, once per fetched page that looks like HTML (PER-177). `blocked.py` is also
+called by `fetcher.py`, once per fetched page REGARDLESS of `Content-Type` — a blocked
+response is not always HTML — and its result travels on `CrawledPage.blocked_reason` to
+`crawler.py`, which is the only module that acts on it (a blocked seed fails the run; a
+blocked frontier page is counted and left out of the crawl's own `pages`). `url_ranking.py`
+is called by `service.py`, over whatever `sitemap.py` discovers, to build `crawl_site`'s
+`extra_urls` (PER-176). `robots.py`'s `parse_robots` is called only by `sitemap.py`, over the
+one `robots.txt` fetch a run makes; `url_ranking.py` imports `RobotsRules` only for its
+`select_urls(..., robots=...)` parameter's type, and calls the `RobotsRules.is_allowed` method
+on whatever `sitemap.py` already parsed — neither module, nor `fetcher.py` or `crawler.py`,
+ever parses a `robots.txt` body itself.
 
 Like any other feature's `internals/`, this package is private: only
 `app.features.crawl.service` and this feature's own modules import from it. No other
