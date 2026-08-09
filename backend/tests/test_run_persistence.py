@@ -145,7 +145,7 @@ async def test_success_writes_a_completed_row_with_artifact_storage_path_and_sta
     assert row["completed_at"] is not None
 
     stats = json.loads(row["stats"])
-    assert stats["version"] == 9
+    assert stats["version"] == 10
     assert stats["pages_crawled"] == 1
     assert "cap_hit" in stats
     assert stats["pages_empty_content"] == 1, "the ok_handler's body has no extractable content"
@@ -418,7 +418,7 @@ async def test_partial_stats_survive_an_upload_failure(websites_db: Pool) -> Non
     assert row is not None
     stats = json.loads(row["stats"])
     assert stats["pages_crawled"] == 1
-    assert stats["version"] == 9
+    assert stats["version"] == 10
     # A failure row carries the same KEYS as a success row, at their hoisted defaults — the
     # shape `runs.stats` stores must not depend on how far a run got before it failed. The
     # four PER-180 counters are part of that same guarantee now: this suite's `_execute`
@@ -1032,12 +1032,12 @@ async def test_a_site_with_no_sitemap_falls_back_to_the_links_on_its_seed_page(
     assert stats["urls_discovered"] == 3, "off-origin, mailto: and fragment-only never count"
     assert stats["urls_selected"] == 3
     assert stats["pages_crawled"] == 4
-    assert stats["version"] == 9, (
+    assert stats["version"] == 10, (
         "a new VALUE for an existing key is still not a new shape — PER-178 added "
-        '`discovery_source: "links"` and deliberately did not bump for it. This row reads 9 '
-        "because PER-180, PER-191, PER-193, PER-194, and PER-196 each added new KEYS after "
-        "that, which are shape changes; the number moved for reasons that have nothing to do "
-        "with the value asserted above."
+        '`discovery_source: "links"` and deliberately did not bump for it. This row reads 10 '
+        "because PER-180, PER-191, PER-193, PER-194, PER-196 and PER-201 each added new KEYS "
+        "after that, which are shape changes; the number moved for reasons that have nothing "
+        "to do with the value asserted above."
     )
 
 
@@ -1204,6 +1204,18 @@ async def test_a_link_derived_frontier_respects_crawl_max_pages(websites_db: Poo
     assert stats["urls_selected"] == 2
     assert stats["pages_crawled"] == 3
     assert stats["cap_hit"] is None
+    # PER-201. This row is the exact shape that made `cap_hit` alone an unreadable answer to
+    # "did this run spend its whole budget?" — it spent every page it had (3 of 3) and still
+    # reports `cap_hit: None`, for the reason this test's own docstring already gives. The two
+    # keys below are what make it readable: the budget it ran under, and the eight candidates
+    # that lost to it.
+    assert stats["max_pages"] == 3, "the run's OWN budget, not `Settings`' default of 100"
+    assert stats["dropped"]["over_limit"] == 8
+    assert stats["urls_selected"] == stats["max_pages"] - 1, (
+        "`select_urls` is called with `limit=max_pages - 1`, so a run whose `over_limit` "
+        "fired selected exactly that many — the derivation `run-provenance.ts` falls back to "
+        "on a version-9 row, asserted here against the recorded budget it replaces"
+    )
 
 
 async def test_a_site_whose_seed_page_has_no_links_still_completes_a_single_page_run(
@@ -1409,7 +1421,7 @@ async def test_model_titles_reach_llms_txt_and_the_extracted_title_does_not(
     assert "Extracted Title Nobody Should See In The Artifact" not in row["llms_txt"]
 
     stats = json.loads(row["stats"])
-    assert stats["version"] == 9
+    assert stats["version"] == 10
     assert stats["pages_enriched"] == 1
     assert stats["enrich_failures"] == 0
 
@@ -2108,11 +2120,13 @@ async def test_an_unreadable_robots_txt_completes_the_run(websites_db: Pool) -> 
     assert stats["crawl_delay_ms"] == settings.crawl_politeness_delay_ms
 
 
-async def test_stats_version_is_nine(websites_db: Pool) -> None:
-    """[Observability]. A live row lands with `RUN_STATS_VERSION` 9 — the persistence-layer
+async def test_stats_version_is_ten(websites_db: Pool) -> None:
+    """[Observability]. A live row lands with `RUN_STATS_VERSION` 10 — the persistence-layer
     companion to `tests/test_run_stats.py::test_run_stats_version_is_pinned`, which only
-    checks the constant itself."""
-    _website_id, run_id = await _seed_pending_clean_origin(websites_db, "version-nine")
+    checks the constant itself. `max_pages` is asserted alongside it, because a version
+    number that moved without its key arriving would be the one failure this test exists to
+    catch and the constant-only test structurally cannot."""
+    _website_id, run_id = await _seed_pending_clean_origin(websites_db, "version-ten")
     storage = FakeStorage()
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -2126,4 +2140,5 @@ async def test_stats_version_is_nine(websites_db: Pool) -> None:
     row = await websites_db.fetchrow("SELECT stats FROM runs WHERE id = $1", run_id)
     assert row is not None
     stats = json.loads(row["stats"])
-    assert stats["version"] == 9
+    assert stats["version"] == 10
+    assert stats["max_pages"] == settings.crawl_max_pages

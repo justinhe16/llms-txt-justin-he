@@ -20,27 +20,29 @@ def test_run_stats_version_is_pinned() -> None:
     enrichment opt-in's request/outcome, and the body-fingerprint side-channel the retrofit
     diff joins against. PER-196 bumped it a fourth time, from 8 to 9, when `dropped` joined the
     shape — the per-rule selection breakdown (`SelectionResult.dropped`) the Output tab's
-    provenance panel renders. See `RUN_STATS_VERSION`'s own docstring for the full history,
-    including why every one of those nine keys is a real, recorded value on every row from the
-    version that added it onward — `llms_txt_bytes: 0`, `index_diff: None`,
-    `enrich_unavailable_reason: None`, and `dropped: {}` included — rather than an absent key
-    or "not yet computed."
+    provenance panel renders. PER-201 bumped it a fifth time, from 9 to 10, when `max_pages`
+    joined the shape — the run's own page budget, and the only key here that records a
+    CONFIGURED ceiling rather than something the run measured. See `RUN_STATS_VERSION`'s own
+    docstring for the full history, including why every one of those ten keys is a real,
+    recorded value on every row from the version that added it onward — `llms_txt_bytes: 0`,
+    `index_diff: None`, `enrich_unavailable_reason: None`, and `dropped: {}` included — rather
+    than an absent key or "not yet computed."
 
     Pinned here, directly, so a future change to the persisted shape has to bump this constant
     deliberately rather than by accident: `tests/test_run_persistence.py` only checks the
     version NUMBER a live row lands with, which would pass just as happily against a
     `RUN_STATS_VERSION` that was bumped again without anyone noticing this test existed."""
-    assert RUN_STATS_VERSION == 9
+    assert RUN_STATS_VERSION == 10
 
 
-def test_build_run_stats_passes_crawl_stats_through_unchanged_and_adds_nineteen_keys() -> None:
+def test_build_run_stats_passes_crawl_stats_through_unchanged_and_adds_twenty_keys() -> None:
     """`crawl_stats` — including `pages_empty_content` — is spread into the result verbatim;
     `links_emitted`, `full_txt_truncated`, `discovery_source`, `urls_discovered`,
-    `urls_selected`, `urls_robots_disallowed`, `dropped`, `crawl_delay_ms`, `pages_enriched`,
-    `enrich_failures`, `enrich_input_tokens`, `enrich_output_tokens`, `llms_txt_bytes`,
-    `index_diff`, `enrich_requested`, `enrich_applied`, `enrich_unavailable_reason`,
-    `content_hashes`, and `version` are the only nineteen keys `build_run_stats` itself
-    contributes."""
+    `urls_selected`, `urls_robots_disallowed`, `dropped`, `max_pages`, `crawl_delay_ms`,
+    `pages_enriched`, `enrich_failures`, `enrich_input_tokens`, `enrich_output_tokens`,
+    `llms_txt_bytes`, `index_diff`, `enrich_requested`, `enrich_applied`,
+    `enrich_unavailable_reason`, `content_hashes`, and `version` are the only twenty keys
+    `build_run_stats` itself contributes."""
     crawl_stats = {
         "pages_crawled": 3,
         "pages_failed": 1,
@@ -59,6 +61,7 @@ def test_build_run_stats_passes_crawl_stats_through_unchanged_and_adds_nineteen_
         urls_selected=3,
         urls_robots_disallowed=1,
         dropped={"taxonomy": 1, "over_limit": 1},
+        max_pages=100,
         crawl_delay_ms=200,
         pages_enriched=1,
         enrich_failures=0,
@@ -81,6 +84,7 @@ def test_build_run_stats_passes_crawl_stats_through_unchanged_and_adds_nineteen_
         "urls_selected": 3,
         "urls_robots_disallowed": 1,
         "dropped": {"taxonomy": 1, "over_limit": 1},
+        "max_pages": 100,
         "crawl_delay_ms": 200,
         "pages_enriched": 1,
         "enrich_failures": 0,
@@ -113,6 +117,7 @@ def test_index_diff_is_none_and_llms_txt_bytes_zero_on_a_failure_shaped_call() -
         urls_selected=0,
         urls_robots_disallowed=0,
         dropped={},
+        max_pages=100,
         crawl_delay_ms=200,
         pages_enriched=0,
         enrich_failures=0,
@@ -149,6 +154,7 @@ def test_dropped_is_an_empty_map_on_a_failure_shaped_call() -> None:
         urls_selected=0,
         urls_robots_disallowed=0,
         dropped={},
+        max_pages=100,
         crawl_delay_ms=200,
         pages_enriched=0,
         enrich_failures=0,
@@ -183,6 +189,7 @@ def test_links_emitted_is_recorded_as_passed_even_when_it_differs_from_pages_cra
         urls_selected=2,
         urls_robots_disallowed=0,
         dropped={"taxonomy": 7},
+        max_pages=100,
         crawl_delay_ms=200,
         pages_enriched=0,
         enrich_failures=0,
@@ -202,13 +209,13 @@ def test_links_emitted_is_recorded_as_passed_even_when_it_differs_from_pages_cra
 
 def test_build_run_stats_leaves_the_crawl_loops_own_keys_intact() -> None:
     """Every key `crawl_stats` arrived with survives into the result with its original value,
-    alongside the nineteen this module contributes.
+    alongside the twenty this module contributes.
 
     Deliberately NOT a collision test. `build_run_stats` spreads `{**crawl_stats, ...}`, so a
-    `crawl_stats` that already carried one of the nineteen contributed keys would have that
+    `crawl_stats` that already carried one of the twenty contributed keys would have that
     value OVERWRITTEN, not preserved — asserting otherwise here would be asserting the
     opposite of what the code does. The real guarantee, as `build_run_stats`' own docstring
-    states, is that none of the nineteen is a key `CrawlResult.stats` has ever produced, which
+    states, is that none of the twenty is a key `CrawlResult.stats` has ever produced, which
     is a property of `internals/crawler.py` rather than of this function;
     `tests/test_crawler_caps.py` is where that side of it is pinned down."""
     crawl_stats = {"pages_crawled": 1, "pages_empty_content": 0}
@@ -222,6 +229,7 @@ def test_build_run_stats_leaves_the_crawl_loops_own_keys_intact() -> None:
         urls_selected=0,
         urls_robots_disallowed=0,
         dropped={},
+        max_pages=100,
         crawl_delay_ms=200,
         pages_enriched=1,
         enrich_failures=1,
@@ -259,7 +267,7 @@ def test_build_run_stats_leaves_the_crawl_loops_own_keys_intact() -> None:
 
 def test_build_run_stats_carries_the_discovery_counters() -> None:
     """The three PER-176 keys land with exactly the values passed in — a narrower,
-    single-purpose companion to the "adds nineteen keys" test above, named for the acceptance
+    single-purpose companion to the "adds twenty keys" test above, named for the acceptance
     criterion it pins rather than for the mechanics of the dict spread.
 
     `urls_discovered` (7) and `urls_selected` (3) are deliberately unequal to each other and
@@ -278,6 +286,7 @@ def test_build_run_stats_carries_the_discovery_counters() -> None:
         urls_selected=3,
         urls_robots_disallowed=0,
         dropped={},
+        max_pages=100,
         crawl_delay_ms=200,
         pages_enriched=0,
         enrich_failures=0,
@@ -313,6 +322,7 @@ def test_build_run_stats_carries_the_selection_drop_breakdown() -> None:
         urls_selected=2,
         urls_robots_disallowed=0,
         dropped=dropped,
+        max_pages=100,
         crawl_delay_ms=200,
         pages_enriched=0,
         enrich_failures=0,
@@ -328,6 +338,46 @@ def test_build_run_stats_carries_the_selection_drop_breakdown() -> None:
 
     assert stats["dropped"] == dropped
     assert list(stats["dropped"].keys()) == list(dropped.keys())
+
+
+def test_build_run_stats_records_the_page_budget_even_when_nothing_hit_it() -> None:
+    """The PER-201 key is passed through verbatim, on a run where the budget was nowhere near
+    binding — 17 discovered, 2 selected, `over_limit` never fired — and at a value that is not
+    `Settings.crawl_max_pages`'s default, so a pass-through failure cannot hide behind the
+    number this key usually holds.
+
+    That combination is the whole reason this key is recorded rather than derived. The
+    `urls_selected + 1` derivation a version-9 reader has to fall back on is valid only when
+    `dropped["over_limit"] > 0` (`RUN_STATS_VERSION`'s version-10 paragraph); here it would
+    report a 3-page budget for a run that actually had 40.
+    """
+    crawl_stats = {"pages_crawled": 3, "pages_empty_content": 0}
+
+    stats = build_run_stats(
+        crawl_stats,
+        links_emitted=3,
+        full_txt_truncated=0,
+        discovery_source="sitemap",
+        urls_discovered=17,
+        urls_selected=2,
+        urls_robots_disallowed=0,
+        dropped={"taxonomy": 15},
+        max_pages=40,
+        crawl_delay_ms=200,
+        pages_enriched=0,
+        enrich_failures=0,
+        enrich_input_tokens=0,
+        enrich_output_tokens=0,
+        llms_txt_bytes=128,
+        index_diff=None,
+        enrich_requested=False,
+        enrich_applied=False,
+        enrich_unavailable_reason=None,
+        content_hashes={},
+    )
+
+    assert stats["max_pages"] == 40
+    assert stats["dropped"].get("over_limit", 0) == 0
 
 
 def test_build_run_stats_carries_the_enrichment_counters() -> None:
@@ -347,6 +397,7 @@ def test_build_run_stats_carries_the_enrichment_counters() -> None:
         urls_selected=0,
         urls_robots_disallowed=0,
         dropped={},
+        max_pages=100,
         crawl_delay_ms=200,
         pages_enriched=7,
         enrich_failures=2,
@@ -382,6 +433,7 @@ def test_build_run_stats_carries_the_robots_counters() -> None:
         urls_selected=6,
         urls_robots_disallowed=2,
         dropped={"robots_disallowed": 2},
+        max_pages=100,
         crawl_delay_ms=5000,
         pages_enriched=0,
         enrich_failures=0,
@@ -400,7 +452,7 @@ def test_build_run_stats_carries_the_robots_counters() -> None:
 
 
 def _base_kwargs() -> dict:
-    """The eighteen non-intent kwargs `build_run_stats` needs, held fixed across the four
+    """The eleven non-intent kwargs `build_run_stats` needs, held fixed across the four
     cases `test_build_run_stats_carries_the_enrichment_intent_keys` parametrizes over, so only
     the intent-related arguments vary between them."""
     return {
@@ -411,6 +463,7 @@ def _base_kwargs() -> dict:
         "urls_selected": 5,
         "urls_robots_disallowed": 0,
         "dropped": {},
+        "max_pages": 100,
         "crawl_delay_ms": 200,
         "llms_txt_bytes": 500,
         "index_diff": None,

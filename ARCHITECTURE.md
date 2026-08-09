@@ -544,6 +544,30 @@ segment responsible is labelled — `pages_crawled` counts the seed, which is ne
 inequality in this pipeline that does not hold, and a panel that hid the seed would render
 that as broken arithmetic.
 
+**The page budget is recorded as of PER-201, at `RUN_STATS_VERSION` 10** —
+`runs.stats["max_pages"]`, the only key in that dict that records a CONFIGURED ceiling rather
+than something the run measured. It exists because `over_limit` is not a rule a URL fails.
+`select_urls` is called with `limit = crawl_max_pages - 1`, and its walk takes the top of a
+sorted list until that many are selected; there is no score threshold anywhere in it. So
+"99 selected, 252 dropped" reads as a quality judgement unless the budget is on screen beside
+it, and the panel could not put it there — nothing else on the row carries it, and
+`urls_selected` cannot stand in (a run that selected 99 of an allowed 99 and one that selected
+99 of an allowed 400 record the same number). The `urls_selected + 1` reconstruction a
+version-9 row falls back to is valid only where `dropped["over_limit"] > 0`, which is exactly
+why the number is now recorded rather than re-derived by every reader.
+
+**The page cap is also the one cap that can be fully spent without `cap_hit` naming it**, and
+this is a reporting gap the frontend closes rather than a crawler bug. `cap_hit` answers
+"which cap stopped the fetch loop." The page budget stops a run one stage earlier: `select_urls`
+truncates the frontier to `max_pages - 1` before `crawl_site` is handed it, so
+`internals/crawler.py`'s `frontier_was_truncated` check never fires, and its per-fetch
+`len(pages) >= max_pages` guard cannot fire either — with a frontier of exactly `max_pages - 1`
+plus the seed, the last task runs its check at `max_pages - 1`. A run that spent every page it
+had therefore records the same `cap_hit: null` as one that finished with room to spare, and on
+a site larger than the budget it always will. The provenance panel keys its Fetch sentence off
+`dropped["over_limit"]` for that reason (`provenance-copy.ts`'s `fetchCapNote`), so it no
+longer prints "no cap was hit" under a table reading "-252 Over the page limit".
+
 **A row written before version 9 degrades to its totals, not to nothing.** Absence of the
 `dropped` key means exactly one thing — this row predates version 9 — and `urls_discovered`,
 `urls_selected` (version 4) and `urls_robots_disallowed` (version 6) are all still on it, so

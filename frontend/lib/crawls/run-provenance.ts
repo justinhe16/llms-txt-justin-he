@@ -89,6 +89,40 @@ export type IndexState =
   | { kind: "not_stored" }
   | { kind: "stored"; indexed: number; omittedEmpty: number };
 
+/**
+ * The page budget this run ran under — `stats.max_pages`, and what ranking was therefore
+ * allowed to select.
+ *
+ * **This is the number that makes the Selection stage readable rather than merely accurate.**
+ * "99 URLs selected, 252 dropped" invites exactly one wrong reading — that the 252 failed some
+ * quality bar — and the right reading is only available with the budget beside it: 351
+ * candidates passed every rule, ranking sorted them, and the top 99 fit. There is no
+ * threshold anywhere in `url_ranking.py`'s walk; there is a queue and a cut-off.
+ *
+ * `source` records where the number came from, because the two are not equally available:
+ *
+ * * `"recorded"` — `stats.max_pages`, a `RUN_STATS_VERSION` 10 key (PER-201). Always right,
+ *   and present whether or not the budget actually bound.
+ * * `"derived"` — a version-9-or-earlier row, reconstructed as `urlsSelected + 1`.
+ *   `select_urls` is called with `limit = max_pages - 1` and its `"over_limit"` rule fires
+ *   only once `len(selected)` has reached that limit, so on a row where `over_limit` fired,
+ *   `urlsSelected === max_pages - 1` exactly. **This derivation is available only on such a
+ *   row** — on any other, `urlsSelected` is just how many URLs the site happened to have, and
+ *   `+ 1` would report a budget of 3 for a run that really had 100. That one-sidedness is why
+ *   version 10 records the number rather than leaving every reader to reimplement a rule that
+ *   silently has no answer half the time, and why `pageBudget` is `null` rather than a guess
+ *   on an old row whose budget never bound.
+ */
+export interface PageBudget {
+  /** The whole budget, seed included — `Settings.crawl_max_pages`. */
+  maxPages: number;
+  /** What ranking was allowed to select: `maxPages - 1`. The seed is fetched separately and
+   * already counts against the budget (`url_ranking.py`'s own `limit` parameter), so this,
+   * not `maxPages`, is the number `urlsSelected` should be read against. */
+  frontierLimit: number;
+  source: "recorded" | "derived";
+}
+
 /** The Fetch stage's numbers — see `runProvenance`'s docstring for the seed/frontier split and
  * which inequalities involving these fields hold and which do not. */
 export interface FetchInfo {
@@ -113,12 +147,55 @@ export interface RunProvenance {
   discoverySource: string | null;
   urlsDiscovered: number | null;
   selection: SelectionState;
+  /** This run's page budget, or `null` when the row neither records nor allows deriving one
+   * — see `PageBudget`. */
+  pageBudget: PageBudget | null;
+  /** How many candidates the `"over_limit"` rule dropped, or `null` on a row with no per-rule
+   * split to read it from.
+   *
+   * Broken out of `selection.rows` rather than left for the renderer to find, because it is
+   * the one rule two different stages need: it is what tells Selection that the budget was the
+   * binding constraint, and it is what tells Fetch that `cap_hit: null` does NOT mean the run
+   * had budget to spare (`runProvenance`'s docstring, "The cap the Fetch stage cannot see").
+   * A `0` here is a real recorded zero — the rule did not fire — and is distinct from `null`.
+   */
+  overLimit: number | null;
   fetch: FetchInfo;
   index: IndexState;
 }
 
 function finiteNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * This run's page budget: `stats.max_pages` when the row records one, the `urlsSelected + 1`
+ * reconstruction when it does not but `"over_limit"` fired, `null` otherwise.
+ *
+ * See `PageBudget`'s own docstring for why the fallback is valid in exactly one case and
+ * silently wrong everywhere else — that asymmetry is the entire reason this function returns
+ * `null` rather than a best effort. A budget rendered as "100 pages" when it was really 3 is
+ * worse than no budget rendered at all: the first is a wrong answer to the question the panel
+ * was opened to ask, and the second is the panel declining to answer it.
+ *
+ * `maxPages < 1` is refused rather than clamped. `Settings.crawl_max_pages` is `ge=1`, so a
+ * row carrying less is a row this module does not understand, and the honest response to that
+ * is `null` — the same reasoning `selectionState` applies to a `dropped` value that is not a
+ * plain object.
+ */
+function pageBudget(
+  stats: Record<string, unknown>,
+  urlsSelected: number | null,
+  overLimit: number | null
+): PageBudget | null {
+  const recorded = finiteNumber(stats.max_pages);
+  if (recorded !== null && recorded >= 1) {
+    return { maxPages: recorded, frontierLimit: recorded - 1, source: "recorded" };
+  }
+  if (urlsSelected !== null && overLimit !== null && overLimit > 0) {
+    return { maxPages: urlsSelected + 1, frontierLimit: urlsSelected, source: "derived" };
+  }
+  return null;
 }
 
 function selectionState(
@@ -253,6 +330,28 @@ export function selectionSelected(selection: SelectionState): number | null {
  * `Math.max(0, …)` in both is a clamp against a stats row whose numbers disagree, the same
  * clamp rationale `stats-display.ts`'s `outcomeBreakdown` gives for its own remainder.
  *
+ * ## The cap the Fetch stage cannot see
+ *
+ * **`cap_hit: null` does not mean the run had budget to spare, and on a site with more pages
+ * than the budget it never will.** `crawl_site` records `cap_hit: "pages"` from exactly two
+ * places (`internals/crawler.py`), and a run whose page budget was fully consumed reaches
+ * neither:
+ *
+ * * The loop's own truncation sets it when the frontier it was handed is longer than
+ *   `max_pages - 1`. But `select_urls` was already called with `limit = max_pages - 1`, so the
+ *   frontier that arrives is never longer than that, and `frontier_was_truncated` is always
+ *   `false`.
+ * * The per-fetch guard sets it when `len(pages) >= max_pages`. With a frontier of exactly
+ *   `max_pages - 1` and the seed already appended, the last frontier task runs its check when
+ *   `len(pages)` is at most `max_pages - 1`. It never fires either.
+ *
+ * So the run that spent every page it had reports the same `cap_hit: null` as the run that
+ * finished with room left over, and the panel would otherwise print "no cap was hit" directly
+ * under a row reading "-252 Over the page limit." `overLimit` above is what separates the two,
+ * and `provenance-copy.ts`'s `fetchCapNote` is what says so. This is a REPORTING gap, not a
+ * crawler bug: `cap_hit` faithfully answers "which cap stopped the fetch loop," and the page
+ * budget stopped this run one stage earlier, where that field cannot see it.
+ *
  * ## Index
  *
  * `{ kind: "not_stored" }` whenever `run.status !== "completed"` — not gated on whether
@@ -275,6 +374,17 @@ export function runProvenance(run: Pick<RunDetail, "status" | "stats">): RunProv
   const bytesFetched = finiteNumber(stats.bytes_fetched);
   const capHit = typeof stats.cap_hit === "string" ? stats.cap_hit : null;
 
+  // Read off the stored map directly rather than out of `selection.rows`, so it is available
+  // in the same shape whatever state selection landed in — `null`, never `0`, on a row with no
+  // per-rule split, because "this row does not record which rules fired" and "this rule
+  // dropped nothing" are different facts and the Fetch stage's wording below turns on which
+  // one it is.
+  const droppedMap = stats.dropped;
+  const overLimit =
+    droppedMap !== null && typeof droppedMap === "object" && !Array.isArray(droppedMap)
+      ? (finiteNumber((droppedMap as Record<string, unknown>).over_limit) ?? 0)
+      : null;
+
   const seedFetched = pagesCrawled !== null && pagesCrawled > 0;
   const frontierFetched = pagesCrawled === null ? 0 : Math.max(0, pagesCrawled - 1);
   const notAttempted =
@@ -293,6 +403,8 @@ export function runProvenance(run: Pick<RunDetail, "status" | "stats">): RunProv
     discoverySource,
     urlsDiscovered,
     selection: selectionState(stats, urlsDiscovered, urlsSelected, seedFetched),
+    pageBudget: pageBudget(stats, urlsSelected, overLimit),
+    overLimit,
     fetch: { seedFetched, frontierFetched, failed, notAttempted, bytesFetched, capHit },
     index,
   };

@@ -106,6 +106,18 @@ score by up to ±1.0. A `lastmod` moves it by up to ±0.2, measured against the 
 the same run. Equal scores break on the URL string, so a repeat run of an unchanged site
 selects the same pages.
 
+The over-limit rule is the one drop rule that is not a judgement about the URL. Every other
+rule reads a URL and decides. This one runs after scoring: survivors are sorted, selection
+walks the list, and everything past the budget is dropped on position. There is no score
+threshold — the URL ranked one place below the cut is dropped for the same reason the last
+one ranked 300 places below it is.
+
+The budget is 99 URLs, and it is not a target ranking aims at. A run fetches at most 100
+pages; the seed is fetched separately and is one of them, so selection is called with a limit
+of exactly 99 and can never return more. A site with 350 eligible pages and a site with 3,500
+both select 99. Raising what a run selects means raising the page cap, which is a deployment
+setting and not a property of the site or of how well it ranked.
+
 ## Fetch
 
 Fetching runs under a fixed set of caps on page count, total bytes, wall clock, per-request
