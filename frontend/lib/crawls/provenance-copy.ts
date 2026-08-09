@@ -132,8 +132,10 @@ export function selectionRuleCopy(key: string): { label: string; explanation: st
  * `links` names the ticket's own Discovery requirement directly: when the source is `links`,
  * the panel says the sitemap fallback was used and the seed page's own links were read
  * instead, rather than merely naming the source and leaving a reader to know what "links"
- * means. `none` is the seed-only case — the funnel state `run-provenance.ts` renders as one
- * sentence rather than an empty table.
+ * means. `none` is the "discovery found nothing" case — `run-provenance.ts` renders it as one
+ * of two sentences, not an empty table, depending on whether the seed itself was fetched — see
+ * `discoverySourceCopy` below: this `"none"` entry's `explanation` is not always the one that
+ * ends up rendered.
  */
 export const DISCOVERY_SOURCE: Record<string, { label: string; explanation: string }> = {
   sitemap: {
@@ -160,6 +162,41 @@ export const DISCOVERY_SOURCE: Record<string, { label: string; explanation: stri
 };
 
 /**
+ * `DISCOVERY_SOURCE["none"]`'s explanation is only true when the seed itself was fetched — it
+ * says outright that the run "crawled the seed alone," which is a real claim about a fetch
+ * that happened, not merely about discovery finding nothing. When the seed never landed (a
+ * domain that is entirely down, `fetch.seedFetched === false`), this replaces it with a
+ * sentence that claims nothing about the seed beyond the fact that it was not fetched — the
+ * Discovery-section half of the same distinction `run-provenance.ts`'s `"seed_not_fetched"`
+ * `SelectionState` draws for the Selection section below it. The two must read as one story,
+ * not two: see that type's own docstring for the row (`test_run_persistence.py`'s
+ * `test_a_failed_seed_reports_no_discovery_source_even_with_the_fallback_armed`) that would
+ * otherwise have this panel contradict itself between its first two sections.
+ */
+export const DISCOVERY_NONE_SEED_NOT_FETCHED =
+  "No discovery source produced anything, and the seed page itself could not be fetched — nothing was crawled for this run.";
+
+/**
+ * `discoverySource` plus whether the seed itself landed, turned into the Discovery section's
+ * label/explanation pair. A thin wrapper around `DISCOVERY_SOURCE`, not a second lookup table
+ * — every entry is unchanged except `"none"`, which needs `fetch.seedFetched` to pick between
+ * the two sentences above. `null` when `source` is `null` or unrecognised, matching
+ * `DISCOVERY_SOURCE[source] ?? null`'s existing contract.
+ */
+export function discoverySourceCopy(
+  source: string | null,
+  seedFetched: boolean
+): { label: string; explanation: string } | null {
+  if (source === null) return null;
+  const copy = DISCOVERY_SOURCE[source];
+  if (copy === undefined) return null;
+  if (source === "none" && !seedFetched) {
+    return { label: copy.label, explanation: DISCOVERY_NONE_SEED_NOT_FETCHED };
+  }
+  return copy;
+}
+
+/**
  * Every `cap_hit` value `internals/crawler.py` can record (`pages`, `bytes`, `wall_clock`),
  * plus the sentence for `cap_hit: null`. Wording is bound by ARCHITECTURE.md §3.4: "hitting a
  * cap is a success, not a failure" — never "stopped short", "cut off", or a failure colour
@@ -173,6 +210,21 @@ export const CAP_HIT: Record<string, string> = {
 
 /** `cap_hit: null` — every page the run selected was fetched before any cap was reached. */
 export const NO_CAP_HIT = "No cap was hit — the run finished before any budget ran out.";
+
+/**
+ * `capHit` (`fetch.capHit`, `run-provenance.ts`) turned into the Fetch stage's closing
+ * sentence. Not a bare `CAP_HIT[capHit] ?? NO_CAP_HIT` lookup, because that fallback asserts
+ * the opposite of what happened for a `cap_hit` value this table has no copy for yet: it
+ * would print "no cap was hit" onto a row that a cap DID end. Not reachable today — every
+ * value `internals/crawler.py` can record is in `CAP_HIT` — but `selectionRuleCopy` already
+ * sets the precedent for degrading to the raw key rather than asserting a fact with no
+ * evidence for it, and this is that same precedent applied here. Still bound by
+ * ARCHITECTURE.md §3.4: even the degrade path stays out of failure language.
+ */
+export function capHitCopy(capHit: string | null): string {
+  if (capHit === null) return NO_CAP_HIT;
+  return CAP_HIT[capHit] ?? `Ended on a cap this panel has no name for yet: "${capHit}".`;
+}
 
 /** The disclosure's own summary text, closed by default. */
 export const PROVENANCE_SUMMARY = "Show how this was built";

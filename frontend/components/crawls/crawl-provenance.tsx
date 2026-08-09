@@ -13,9 +13,8 @@ import {
 } from "@/components/ui/table";
 import type { RunDetail } from "@/lib/api/runs";
 import {
-  CAP_HIT,
-  DISCOVERY_SOURCE,
-  NO_CAP_HIT,
+  capHitCopy,
+  discoverySourceCopy,
   PROVENANCE_HEADINGS,
   PROVENANCE_SUMMARY,
   SELECTION_DOCS_LINK,
@@ -41,20 +40,26 @@ import { EmptyCell } from "./empty-cell";
  * first cut — see `lib/crawls/run-provenance.ts`'s own module docstring for the numbers this
  * reads and `lib/crawls/provenance-copy.ts` for every string it renders.
  *
- * ## Four states, driven by `runProvenance(run)`
+ * ## Five states, driven by `runProvenance(run)`
  *
  * | `run.stats` | rendered |
  * | --- | --- |
  * | absent entirely | nothing — `CrawlProvenance` returns `null` |
  * | present, `dropped` absent (pre-`RUN_STATS_VERSION`-9) | Discovery/Fetch/Index render; Selection says the breakdown isn't available |
- * | present, `urls_discovered === 0` | Discovery/Fetch/Index render; Selection is one sentence, not an empty table |
+ * | present, `urls_discovered === 0`, seed never fetched | Discovery/Fetch/Index render; Discovery and Selection both say nothing was crawled — never "the seed alone," which the seed's own failure to fetch would make false |
+ * | present, `urls_discovered === 0`, seed fetched | Discovery/Fetch/Index render; Selection is one sentence, not an empty table |
  * | present, a real breakdown | all four stages, the funnel as a table |
  *
- * A failed run is not a fifth state of this component — it renders whichever of the four
+ * A failed run is not a sixth state of this component — it renders whichever of the four
  * stages its own partial `stats` describe, exactly as the ticket's own States section asks
- * ("show whatever stages completed before the failure"). The one place `run.status ===
- * "failed"` changes wording is the Fetch stage's closing sentence, which reports the run
- * failed rather than naming a cap that never actually ended it.
+ * ("show whatever stages completed before the failure"). One place `run.status === "failed"`
+ * changes wording directly is the Fetch stage's closing sentence, which reports the run
+ * failed rather than naming a cap that never actually ended it. The third row above
+ * (`"seed_not_fetched"`, `lib/crawls/run-provenance.ts`) is the same idea reaching the
+ * Discovery and Selection stages instead — not gated on `status` directly, but in practice
+ * only reachable by a failed run, since `internals/crawler.py` never lets a run complete
+ * without its seed: a failed seed fetch is real information, not a lower-confidence version
+ * of "the seed alone was crawled."
  *
  * ## Why `<details>`/`<summary>` and not a `components/ui/` primitive
  *
@@ -114,7 +119,7 @@ function StageHeading({ children }: { children: React.ReactNode }) {
 
 function DiscoverySection({ provenance }: { provenance: RunProvenance }) {
   const source = provenance.discoverySource;
-  const copy = source === null ? null : (DISCOVERY_SOURCE[source] ?? null);
+  const copy = discoverySourceCopy(source, provenance.fetch.seedFetched);
 
   return (
     <section>
@@ -173,6 +178,14 @@ function SelectionBody({
       return (
         <p className="text-sm text-muted-foreground">
           The selection breakdown isn&apos;t available for this run.
+        </p>
+      );
+
+    case "seed_not_fetched":
+      return (
+        <p className="text-sm text-muted-foreground">
+          Discovery found nothing for this run, and the seed page itself could not be fetched
+          — nothing was crawled.
         </p>
       );
 
@@ -282,7 +295,7 @@ function FetchSection({
       <p className="mt-2 text-xs text-muted-foreground">
         {status === "failed"
           ? "This run failed before fetching finished."
-          : (fetch.capHit === null ? NO_CAP_HIT : (CAP_HIT[fetch.capHit] ?? NO_CAP_HIT))}
+          : capHitCopy(fetch.capHit)}
       </p>
     </section>
   );

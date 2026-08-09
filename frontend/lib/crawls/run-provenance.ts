@@ -1,7 +1,7 @@
 // The view model behind the Output tab's "Show how this was built" panel
 // (components/crawls/crawl-provenance.tsx) — one run's `stats` turned into the four stages
-// the ticket asks for (Discovery, Selection, Fetch, Index), plus the three states its own
-// numbers can be in (unavailable, seed-only, a real breakdown).
+// the ticket asks for (Discovery, Selection, Fetch, Index), plus the four states its own
+// numbers can be in (unavailable, seed-never-fetched, seed-only, a real breakdown).
 //
 // Reads `run.stats` the same defensive `?.`/`typeof`/`Number.isFinite` way `run-display.ts`'s
 // `runPagesCrawled` does, for the identical reason: `stats` is jsonb whose shape belongs to
@@ -12,7 +12,7 @@
 // a shape this module builds, not one the backend returns.
 //
 // The rule labels and one-line explanations are NOT here. This module owns the numbers and
-// the three-state predicate; `lib/crawls/provenance-copy.ts` owns every string a human wrote —
+// the four-state predicate; `lib/crawls/provenance-copy.ts` owns every string a human wrote —
 // `SELECTION_RULE_ORDER`, `selectionRuleCopy`, `DISCOVERY_SOURCE`, `CAP_HIT` — the same split
 // `enrichment-copy.ts` vs `run-display.ts` already draws for the Runs and Output tabs'
 // enrichment badge (ARCHITECTURE.md §8.4).
@@ -30,21 +30,35 @@ export interface SelectionRow {
 }
 
 /**
- * The three states `runs.stats["dropped"]` can put the Selection stage in — see the ticket's
+ * The four states `runs.stats["dropped"]` can put the Selection stage in — see the ticket's
  * own States section, and the acceptance criterion this type exists to make impossible to get
- * wrong: never a zero standing in for "unknown."
+ * wrong: never a zero standing in for "unknown," and never two stages of the same panel
+ * disagreeing about what happened.
  *
  * * `"unavailable"` — `stats.dropped` is not a plain object at all, which is exactly what a
  *   row written before `RUN_STATS_VERSION` 9 looks like (the key is simply absent). The panel
  *   says the selection breakdown isn't available for this run, and renders no numbers.
- * * `"seed_only"` — discovery found nothing (`urlsDiscovered === 0`): a sitemap that 404'd,
- *   404'd again, and a seed page with no links either. The funnel is one row, not an empty
- *   table.
+ * * `"seed_not_fetched"` — discovery found nothing (`urlsDiscovered === 0`) AND the seed
+ *   itself never landed (`!seedFetched`, i.e. `pagesCrawled === 0` — `internals/crawler.py`'s
+ *   own comment that an empty `pages` list is exactly equivalent to "the seed never landed").
+ *   A domain that is entirely down, not a page that was merely light on links. Distinct from
+ *   `"seed_only"` on purpose: this state makes NO claim that the seed was crawled, because it
+ *   was not — see `test_a_failed_seed_reports_no_discovery_source_even_with_the_fallback_armed`
+ *   (`backend/tests/test_run_persistence.py`) for the row that would otherwise render "the run
+ *   crawled the seed alone" in this same panel's Selection section, directly above a Fetch
+ *   section reading "Fetched: 0."
+ * * `"seed_only"` — discovery found nothing (`urlsDiscovered === 0`) but the seed WAS fetched
+ *   (`seedFetched`): a sitemap that 404'd, 404'd again, and a seed page with no links either.
+ *   The funnel is one row, not an empty table.
  * * `"breakdown"` — a real funnel: every rule that fired, in `SELECTION_RULE_ORDER`, plus
- *   `selected`, the frontier `crawl_site` actually got.
+ *   `selected`, the frontier `crawl_site` actually got. Reachable even when the seed itself
+ *   later failed to fetch (sitemap discovery runs before the seed is fetched — see
+ *   `service.py`'s `execute_run`) — that combination is not this type's problem to flag: it
+ *   makes no "the seed was crawled" claim, so nothing here contradicts the Fetch stage.
  */
 export type SelectionState =
   | { kind: "unavailable" }
+  | { kind: "seed_not_fetched" }
   | { kind: "seed_only" }
   | { kind: "breakdown"; rows: SelectionRow[]; droppedTotal: number; selected: number };
 
@@ -90,7 +104,8 @@ function finiteNumber(value: unknown): number | null {
 function selectionState(
   stats: Record<string, unknown>,
   urlsDiscovered: number | null,
-  urlsSelected: number | null
+  urlsSelected: number | null,
+  seedFetched: boolean
 ): SelectionState {
   const dropped = stats.dropped;
   // Pre-version-9 rows simply have no `dropped` key; `typeof null === "object"` is why `null`
@@ -101,7 +116,11 @@ function selectionState(
   }
 
   if (urlsDiscovered === 0) {
-    return { kind: "seed_only" };
+    // Both branches are "the funnel is one row, not an empty table" — which row depends on
+    // whether the seed itself landed. Claiming "crawled the seed alone" when the seed never
+    // fetched is the exact contradiction `"seed_not_fetched"` exists to rule out; see this
+    // type's own docstring above.
+    return seedFetched ? { kind: "seed_only" } : { kind: "seed_not_fetched" };
   }
 
   const droppedMap = dropped as Record<string, unknown>;
@@ -213,7 +232,7 @@ export function runProvenance(run: Pick<RunDetail, "status" | "stats">): RunProv
   return {
     discoverySource,
     urlsDiscovered,
-    selection: selectionState(stats, urlsDiscovered, urlsSelected),
+    selection: selectionState(stats, urlsDiscovered, urlsSelected, seedFetched),
     fetch: { seedFetched, frontierFetched, failed, notAttempted, bytesFetched, capHit },
     index,
   };

@@ -530,8 +530,8 @@ folding the new keys into 3 would have left two different shapes stamped with th
 — exactly the ambiguity the field exists to prevent. See `RUN_STATS_VERSION`'s own docstring.
 
 **`SelectionResult.dropped` itself reaches `runs.stats` as of PER-196, at `RUN_STATS_VERSION`
-9.** The Output tab's Output-artifact-adjacent provenance panel — a collapsed-by-default
-disclosure, "Show how this was built" — is its one reader
+9.** The Output tab's provenance panel — a collapsed-by-default disclosure, "Show how this was
+built" — is its one reader
 (`frontend/components/crawls/crawl-provenance.tsx`), turning a run's discovery source, its
 selection funnel, its fetch counts, and its index counts into a plain-language explanation of
 how that run's seed URL became its `llms.txt`. Only rule KEYS travel from backend to frontend;
