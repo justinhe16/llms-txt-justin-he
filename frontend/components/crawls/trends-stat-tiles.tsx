@@ -175,6 +175,11 @@ export function TrendsOutputTiles({ latest }: { latest: StatsLatest | null }) {
 
   return (
     <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
+      {/* `index_pages` is `links_emitted + links_optional` as of `RUN_STATS_VERSION` 13
+          (backend-computed — see `RunStatsPoint.index_pages`'s own docstring) — this tile keeps
+          its label and meaning, "pages in the artifact", even though some of them now render
+          under `## Optional` rather than the main body. The curation ratio itself is visible
+          via the provenance panel's `listedOptional` row, not here. */}
       <StatTile
         label="Pages in index"
         value={latest?.index_pages ?? null}

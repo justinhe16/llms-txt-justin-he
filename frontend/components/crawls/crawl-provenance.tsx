@@ -198,6 +198,13 @@ const SEGMENT_FILL = {
   // page this run correctly declined to index, not something that went wrong.
   omittedHttpError: "bg-muted-foreground/25",
   omittedOffOrigin: "bg-muted-foreground/25",
+  // `bg-chart-3`, NOT the grey every omission above uses — a page under `## Optional` is
+  // carried FORWARD into the artifact, not lost, the same "carried forward but distinguished"
+  // fill `seed` already uses above.
+  listedOptional: "bg-chart-3",
+  // A duplicate IS an omission — the page is not a link anywhere in the artifact — so it takes
+  // the same neutral grey every other omission on this list does.
+  omittedDuplicate: "bg-muted-foreground/25",
 } as const;
 
 type SegmentKey = keyof typeof SEGMENT_FILL;
@@ -258,7 +265,10 @@ function funnelPreview(provenance: RunProvenance): string {
     parts.push(`${provenance.fetch.blocked.toLocaleString()} ${PROVENANCE_PREVIEW.blocked}`);
   }
   if (provenance.index.kind === "stored") {
-    parts.push(`${provenance.index.indexed.toLocaleString()} ${PROVENANCE_PREVIEW.listed}`);
+    // Main body plus Optional — see the Index stage's own `headline` comment for why this sum,
+    // not `index.indexed` alone, is "what reached `llms.txt`".
+    const listed = provenance.index.indexed + (provenance.index.listedOptional ?? 0);
+    parts.push(`${listed.toLocaleString()} ${PROVENANCE_PREVIEW.listed}`);
   }
   return parts.join(" · ");
 }
@@ -380,16 +390,23 @@ function funnelStages(provenance: RunProvenance, status: RunDetail["status"]): F
       key: "index",
       heading: PROVENANCE_HEADINGS.index,
       icon: FileCode2Icon,
-      headline: index.kind === "stored" ? index.indexed : null,
+      // Main body PLUS Optional — the stage answers "what reached `llms.txt`", and a page
+      // under `## Optional` reached it exactly as much as one in the main body did. `?? 0` is
+      // safe here (unlike the six-term invariant in `run-provenance.ts`, which must NOT do
+      // this): a pre-version-13 row has no Optional concept to report, so it contributes
+      // nothing to the headline, and the headline was already correct before this key existed.
+      headline: index.kind === "stored" ? index.indexed + (index.listedOptional ?? 0) : null,
       unit: PROVENANCE_STAGE_UNITS.index,
       subject: null,
       segments:
         index.kind === "stored"
           ? [
               { key: "listed", value: index.indexed },
+              { key: "listedOptional", value: index.listedOptional ?? 0 },
               { key: "omittedEmpty", value: index.omittedEmpty },
               { key: "omittedHttpError", value: index.omittedHttpError },
               { key: "omittedOffOrigin", value: index.omittedOffOrigin },
+              { key: "omittedDuplicate", value: index.omittedDuplicate ?? 0 },
             ]
           : [],
       note: index.kind === "stored" ? null : "No index was stored for this run.",

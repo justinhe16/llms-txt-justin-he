@@ -35,23 +35,29 @@ def test_run_stats_version_is_pinned() -> None:
     real, recorded value on every row from the version that added it onward —
     `llms_txt_bytes: 0`, `index_diff: None`, `enrich_unavailable_reason: None`, `dropped: {}`,
     `max_pages` set to the run's own configured budget, `pages_blocked: 0`, and
-    `blocked_reason: None` included — rather than an absent key or "not yet computed."
+    `blocked_reason: None` included — rather than an absent key or "not yet computed." An
+    eighth bump, from 12 to 13, added `links_optional` and `links_duplicate` and redefined
+    `links_emitted` a SECOND time (the curated-`llms.txt` ticket): `links_emitted` now counts
+    only the MAIN-BODY links, `links_optional` counts the ones demoted to `## Optional`
+    instead (still in the artifact, just not the curated top), and `links_duplicate` is a
+    fourth named reason a fetched page never reaches the index at all — this run's own dedup
+    pass collapsed it into an already-kept survivor.
 
     Pinned here, directly, so a future change to the persisted shape has to bump this constant
     deliberately rather than by accident: `tests/test_run_persistence.py` only checks the
     version NUMBER a live row lands with, which would pass just as happily against a
     `RUN_STATS_VERSION` that was bumped again without anyone noticing this test existed."""
-    assert RUN_STATS_VERSION == 12
+    assert RUN_STATS_VERSION == 13
 
 
-def test_build_run_stats_passes_crawl_stats_through_unchanged_and_adds_twenty_keys() -> None:
+def test_build_run_stats_passes_crawl_stats_through_unchanged_and_adds_twenty_two_keys() -> None:
     """`crawl_stats` — including `pages_empty_content` — is spread into the result verbatim;
-    `links_emitted`, `full_txt_truncated`, `discovery_source`, `urls_discovered`,
-    `urls_selected`, `urls_robots_disallowed`, `dropped`, `max_pages`, `crawl_delay_ms`,
-    `pages_enriched`, `enrich_failures`, `enrich_input_tokens`, `enrich_output_tokens`,
-    `llms_txt_bytes`, `index_diff`, `enrich_requested`, `enrich_applied`,
-    `enrich_unavailable_reason`, `content_hashes`, and `version` are the only twenty keys
-    `build_run_stats` itself contributes."""
+    `links_emitted`, `links_optional`, `links_duplicate`, `full_txt_truncated`,
+    `discovery_source`, `urls_discovered`, `urls_selected`, `urls_robots_disallowed`,
+    `dropped`, `max_pages`, `crawl_delay_ms`, `pages_enriched`, `enrich_failures`,
+    `enrich_input_tokens`, `enrich_output_tokens`, `llms_txt_bytes`, `index_diff`,
+    `enrich_requested`, `enrich_applied`, `enrich_unavailable_reason`, `content_hashes`, and
+    `version` are the only twenty-two keys `build_run_stats` itself contributes."""
     crawl_stats = {
         "pages_crawled": 3,
         "pages_failed": 1,
@@ -64,6 +70,8 @@ def test_build_run_stats_passes_crawl_stats_through_unchanged_and_adds_twenty_ke
     stats = build_run_stats(
         crawl_stats,
         links_emitted=1,
+        links_optional=2,
+        links_duplicate=1,
         full_txt_truncated=0,
         discovery_source="sitemap",
         urls_discovered=5,
@@ -87,6 +95,8 @@ def test_build_run_stats_passes_crawl_stats_through_unchanged_and_adds_twenty_ke
     assert stats == {
         **crawl_stats,
         "links_emitted": 1,
+        "links_optional": 2,
+        "links_duplicate": 1,
         "full_txt_truncated": 0,
         "discovery_source": "sitemap",
         "urls_discovered": 5,
@@ -120,6 +130,8 @@ def test_index_diff_is_none_and_llms_txt_bytes_zero_on_a_failure_shaped_call() -
     stats = build_run_stats(
         crawl_stats,
         links_emitted=0,
+        links_optional=0,
+        links_duplicate=0,
         full_txt_truncated=0,
         discovery_source="none",
         urls_discovered=0,
@@ -157,6 +169,8 @@ def test_dropped_is_an_empty_map_on_a_failure_shaped_call() -> None:
     stats = build_run_stats(
         crawl_stats,
         links_emitted=0,
+        links_optional=0,
+        links_duplicate=0,
         full_txt_truncated=0,
         discovery_source="none",
         urls_discovered=0,
@@ -192,6 +206,8 @@ def test_links_emitted_is_recorded_as_passed_even_when_it_differs_from_pages_cra
     stats = build_run_stats(
         crawl_stats,
         links_emitted=1,
+        links_optional=0,
+        links_duplicate=0,
         full_txt_truncated=0,
         discovery_source="sitemap",
         urls_discovered=9,
@@ -216,22 +232,72 @@ def test_links_emitted_is_recorded_as_passed_even_when_it_differs_from_pages_cra
     assert stats["links_emitted"] == 1
 
 
+def test_build_run_stats_carries_the_optional_and_duplicate_counts() -> None:
+    """The two version-13 keys land with exactly the values `internals/llms_txt.py`'s
+    `IndexCounts` computed — `links_optional` (demoted, still in the artifact) and
+    `links_duplicate` (collapsed by this run's own dedup pass, never in the artifact at all)
+    are deliberately unequal to each other and to `links_emitted`, so a test that mixed up two
+    of the three would fail rather than pass by coincidence."""
+    crawl_stats = {"pages_crawled": 40, "pages_empty_content": 0}
+
+    stats = build_run_stats(
+        crawl_stats,
+        links_emitted=30,
+        links_optional=8,
+        links_duplicate=2,
+        full_txt_truncated=0,
+        discovery_source="sitemap",
+        urls_discovered=45,
+        urls_selected=40,
+        urls_robots_disallowed=0,
+        dropped={},
+        max_pages=100,
+        crawl_delay_ms=200,
+        pages_enriched=0,
+        enrich_failures=0,
+        enrich_input_tokens=0,
+        enrich_output_tokens=0,
+        llms_txt_bytes=2_048,
+        index_diff=None,
+        enrich_requested=False,
+        enrich_applied=False,
+        enrich_unavailable_reason=None,
+        content_hashes={},
+    )
+
+    assert stats["links_emitted"] == 30
+    assert stats["links_optional"] == 8
+    assert stats["links_duplicate"] == 2
+    # The reconciliation invariant `RUN_STATS_VERSION`'s own version-13 paragraph states:
+    # every fetched page is either indexed (main or Optional) or excluded under exactly one
+    # named reason.
+    assert (
+        stats["links_emitted"]
+        + stats["links_optional"]
+        + stats["links_duplicate"]
+        + stats["pages_empty_content"]
+        == stats["pages_crawled"]
+    )
+
+
 def test_build_run_stats_leaves_the_crawl_loops_own_keys_intact() -> None:
     """Every key `crawl_stats` arrived with survives into the result with its original value,
-    alongside the twenty this module contributes.
+    alongside the twenty-two this module contributes.
 
     Deliberately NOT a collision test. `build_run_stats` spreads `{**crawl_stats, ...}`, so a
-    `crawl_stats` that already carried one of the twenty contributed keys would have that
+    `crawl_stats` that already carried one of the twenty-two contributed keys would have that
     value OVERWRITTEN, not preserved — asserting otherwise here would be asserting the
     opposite of what the code does. The real guarantee, as `build_run_stats`' own docstring
-    states, is that none of the twenty is a key `CrawlResult.stats` has ever produced, which
-    is a property of `internals/crawler.py` rather than of this function;
+    states, is that none of the twenty-two is a key `CrawlResult.stats` has ever produced,
+    which is a property of `internals/crawler.py` rather than of this function;
     `tests/test_crawler_caps.py` is where that side of it is pinned down."""
     crawl_stats = {"pages_crawled": 1, "pages_empty_content": 0}
 
     stats = build_run_stats(
         crawl_stats,
         links_emitted=1,
+        links_optional=3,
+        links_duplicate=4,
         full_txt_truncated=2,
         discovery_source="none",
         urls_discovered=0,
@@ -255,6 +321,8 @@ def test_build_run_stats_leaves_the_crawl_loops_own_keys_intact() -> None:
     assert stats["pages_crawled"] == 1
     assert stats["pages_empty_content"] == 0
     assert stats["links_emitted"] == 1
+    assert stats["links_optional"] == 3
+    assert stats["links_duplicate"] == 4
     assert stats["full_txt_truncated"] == 2
     assert stats["discovery_source"] == "none"
     assert stats["urls_discovered"] == 0
@@ -276,7 +344,7 @@ def test_build_run_stats_leaves_the_crawl_loops_own_keys_intact() -> None:
 
 def test_build_run_stats_carries_the_discovery_counters() -> None:
     """The three PER-176 keys land with exactly the values passed in — a narrower,
-    single-purpose companion to the "adds twenty keys" test above, named for the acceptance
+    single-purpose companion to the "adds twenty-two keys" test above, named for the acceptance
     criterion it pins rather than for the mechanics of the dict spread.
 
     `urls_discovered` (7) and `urls_selected` (3) are deliberately unequal to each other and
@@ -289,6 +357,8 @@ def test_build_run_stats_carries_the_discovery_counters() -> None:
     stats = build_run_stats(
         crawl_stats,
         links_emitted=4,
+        links_optional=0,
+        links_duplicate=0,
         full_txt_truncated=0,
         discovery_source="robots",
         urls_discovered=7,
@@ -325,6 +395,8 @@ def test_build_run_stats_carries_the_selection_drop_breakdown() -> None:
     stats = build_run_stats(
         crawl_stats,
         links_emitted=2,
+        links_optional=0,
+        links_duplicate=0,
         full_txt_truncated=0,
         discovery_source="sitemap",
         urls_discovered=17,
@@ -365,6 +437,8 @@ def test_build_run_stats_records_the_page_budget_even_when_nothing_hit_it() -> N
     stats = build_run_stats(
         crawl_stats,
         links_emitted=3,
+        links_optional=0,
+        links_duplicate=0,
         full_txt_truncated=0,
         discovery_source="sitemap",
         urls_discovered=17,
@@ -400,6 +474,8 @@ def test_build_run_stats_carries_the_enrichment_counters() -> None:
     stats = build_run_stats(
         crawl_stats,
         links_emitted=9,
+        links_optional=0,
+        links_duplicate=0,
         full_txt_truncated=0,
         discovery_source="none",
         urls_discovered=0,
@@ -436,6 +512,8 @@ def test_build_run_stats_carries_the_robots_counters() -> None:
     stats = build_run_stats(
         crawl_stats,
         links_emitted=6,
+        links_optional=0,
+        links_duplicate=0,
         full_txt_truncated=0,
         discovery_source="sitemap",
         urls_discovered=10,
@@ -461,11 +539,13 @@ def test_build_run_stats_carries_the_robots_counters() -> None:
 
 
 def _base_kwargs() -> dict:
-    """The eleven non-intent kwargs `build_run_stats` needs, held fixed across the four
+    """The thirteen non-intent kwargs `build_run_stats` needs, held fixed across the four
     cases `test_build_run_stats_carries_the_enrichment_intent_keys` parametrizes over, so only
     the intent-related arguments vary between them."""
     return {
         "links_emitted": 5,
+        "links_optional": 0,
+        "links_duplicate": 0,
         "full_txt_truncated": 0,
         "discovery_source": "sitemap",
         "urls_discovered": 5,

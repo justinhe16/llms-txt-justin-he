@@ -22,9 +22,11 @@ function run(stats: Record<string, unknown>, status = "completed"): Pick<
 
 const BASE = {
   pages_crawled: 10,
-  links_emitted: 6,
+  links_emitted: 3,
+  links_optional: 2,
+  links_duplicate: 2,
   pages_empty_content: 1,
-  pages_http_error: 2,
+  pages_http_error: 1,
   pages_off_origin: 1,
   urls_discovered: 40,
   urls_selected: 9,
@@ -35,19 +37,21 @@ const BASE = {
 };
 
 describe("runProvenance — the Index stage", () => {
-  it("reports each exclusion under its own reason", () => {
+  it("reports each exclusion under its own reason, plus the Optional bucket", () => {
     const provenance = runProvenance(run(BASE));
 
     expect(provenance?.index).toEqual({
       kind: "stored",
-      indexed: 6,
+      indexed: 3,
       omittedEmpty: 1,
-      omittedHttpError: 2,
+      omittedHttpError: 1,
       omittedOffOrigin: 1,
+      listedOptional: 2,
+      omittedDuplicate: 2,
     });
   });
 
-  it("accounts for every fetched page, so the funnel adds up", () => {
+  it("accounts for every fetched page across all six named reasons, so the funnel adds up", () => {
     const provenance = runProvenance(run(BASE));
     const index = provenance?.index;
 
@@ -55,25 +59,60 @@ describe("runProvenance — the Index stage", () => {
     if (index?.kind !== "stored") return;
 
     const explained =
-      index.indexed + index.omittedEmpty + index.omittedHttpError + index.omittedOffOrigin;
+      index.indexed +
+      (index.listedOptional ?? 0) +
+      index.omittedEmpty +
+      index.omittedHttpError +
+      index.omittedOffOrigin +
+      (index.omittedDuplicate ?? 0);
     expect(explained).toBe(BASE.pages_crawled);
   });
 
   it("does not attribute the new exclusions to empty content", () => {
-    // The regression, stated as its own test: a run that dropped two rate-limited pages and
-    // one cross-origin redirect must not claim three pages had no extractable content.
+    // The regression, stated as its own test: a run that dropped a rate-limited page, a
+    // cross-origin redirect, and a duplicate must not claim three pages had no extractable
+    // content.
     const index = runProvenance(run(BASE))?.index;
 
     expect(index?.kind === "stored" && index.omittedEmpty).toBe(1);
   });
 
-  it("reads a pre-version-12 row as having no such exclusions", () => {
+  it("reads a pre-version-13 row as having no Optional bucket at all — null, never zero", () => {
+    // Rows written before version 13 carry neither key. `null` is the right reading, NOT `0`:
+    // those runs had no Optional concept and no dedup pass to report on, so "how many pages
+    // were listed under Optional" and "how many were deduped" have no answer to give — reading
+    // either as `0` would silently claim a fact about a run that could not have recorded it.
+    const { links_optional, links_duplicate, ...v12 } = BASE;
+    void links_optional;
+    void links_duplicate;
+
+    const index = runProvenance(run({ ...v12, links_emitted: 7 }))?.index;
+
+    expect(index).toEqual({
+      kind: "stored",
+      indexed: 7,
+      omittedEmpty: 1,
+      omittedHttpError: 1,
+      omittedOffOrigin: 1,
+      listedOptional: null,
+      omittedDuplicate: null,
+    });
+    // The four-term invariant a pre-version-13 row still closes under — the six-term one above
+    // is simply not evaluable here, since two of its terms are `null`.
+    expect(index?.kind === "stored" && index.indexed + index.omittedEmpty + index.omittedHttpError + index.omittedOffOrigin).toBe(
+      BASE.pages_crawled
+    );
+  });
+
+  it("reads a pre-version-12 row as having no http-error/off-origin exclusions either", () => {
     // Rows written before version 12 carry neither key. `0` is the right reading: those runs
     // collected such pages into the index instead of excluding them, so there is no exclusion
     // to report — and reporting `null` would make the stage unrenderable for old runs.
-    const { pages_http_error, pages_off_origin, ...v11 } = BASE;
+    const { pages_http_error, pages_off_origin, links_optional, links_duplicate, ...v11 } = BASE;
     void pages_http_error;
     void pages_off_origin;
+    void links_optional;
+    void links_duplicate;
 
     const index = runProvenance(run({ ...v11, links_emitted: 9 }))?.index;
 
@@ -83,6 +122,8 @@ describe("runProvenance — the Index stage", () => {
       omittedEmpty: 1,
       omittedHttpError: 0,
       omittedOffOrigin: 0,
+      listedOptional: null,
+      omittedDuplicate: null,
     });
   });
 

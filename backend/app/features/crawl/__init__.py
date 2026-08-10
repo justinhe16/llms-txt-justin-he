@@ -22,9 +22,14 @@ Layout:
 * `internals/` — see that package's own docstring.
 
 Everything downstream of a fetched page lives behind one pair of functions in
-`internals/llms_txt.py` — `generate_llms_txt(pages: list[CrawledPage], *, site_url: str) ->
-str` and its `generate_llms_full_txt` sibling — and both are pure, deterministic and model-free
-(ARCHITECTURE.md §3.4, CLAUDE.md #9). Calling a model remains out of scope for this
-milestone, and not merely unimplemented: that pass is a layer ABOVE these functions, which
-stay the fallback it degrades to when its flag is off or its API call fails.
+`internals/llms_txt.py` — `generate_llms_txt(pages: list[CrawledPage], *, site_url: str,
+signals: Mapping[str, PageSignals] | None = None) -> str` and its `generate_llms_full_txt`
+sibling — and both are pure, deterministic and model-free (ARCHITECTURE.md §3.4, CLAUDE.md
+#9). `signals` is ranking metadata a discovery step already collected before any page was
+fetched (`PageSignals`'s own docstring), not a breach of that rule. Calling a model remains
+out of scope for this milestone, and not merely unimplemented: that pass is a layer ABOVE
+these functions, which stay the fallback it degrades to when its flag is off or its API call
+fails — and selection stays IDENTICAL either way, because nothing that decides which pages are
+indexed, how they are grouped, or their order ever reads a model-writable field (`title`,
+`description`); only a bullet's label may vary with the flag.
 """

@@ -39,6 +39,13 @@ between runs," not "what changed in the site." `test_parse_index_round_trips_gen
 in `tests/test_index_diff.py` is the drift gate this trades for: `parse_index` and `_bullet`
 (`llms_txt.py`) are two descriptions of one format, and that test is the only thing tying them
 together — see the cross-reference comment on `_bullet` itself.
+
+**`OPTIONAL_SECTION` is imported from `llms_txt.py`, not hardcoded as `"Optional"` a second
+time — a second thing tying these two modules together, and unlike `_bullet`/`parse_index`,
+this one is enforced by the import itself rather than only by a test.** `IndexEntry.optional`
+is `section == OPTIONAL_SECTION`: a page demoted to Optional is still indexed, so added/removed
+semantics stay keyed on `IndexEntry.key` (the URL set) exactly as before this ticket — a page
+moving between the main body and Optional must not read as an add plus a remove.
 """
 
 import hashlib
@@ -47,6 +54,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Final, Literal
 
+from app.features.crawl.internals.llms_txt import OPTIONAL_SECTION
 from app.features.crawl.internals.url_ranking import normalize_url
 from app.features.crawl.schemas import CrawledPage
 
@@ -105,6 +113,16 @@ class IndexEntry:
     """The text after `): ` on the bullet's line, verbatim — `_bullet` never escapes a
     description, so nothing here unescapes it either. `None` when the bullet carried no
     `: description` suffix at all."""
+
+    optional: bool
+    """Whether this entry appeared under `## Optional` rather than in the main body —
+    `section == OPTIONAL_SECTION`, imported from `llms_txt.py` rather than the string
+    `"Optional"` hardcoded a second time (see `parse_index`'s own comment on this import for
+    why it is a stronger tie than a shared test). Appended LAST, this module's stated field-
+    ordering convention for a field added after the others already existed. Added/removed
+    diff semantics still key on `IndexEntry.key`, the URL set, NOT on this flag — a page moving
+    between the main body and Optional is still indexed on both sides of a diff and must not
+    read as an add plus a remove; see `build_index_diff`'s own docstring."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,15 +301,19 @@ def parse_index(llms_txt: str) -> list[IndexEntry]:
     one bullet.
 
     Args:
-        llms_txt: A run's stored `llms.txt` column — either side of a diff. `_EMPTY_DOCUMENT`
-            (`llms_txt.py`) parses to `[]`, the same as any string with no bullet lines.
+        llms_txt: A run's stored `llms.txt` column — either side of a diff. The empty
+            document (`llms_txt.py`'s `_empty_document`) parses to `[]`, the same as any
+            string with no bullet lines.
 
     Returns:
-        Entries in the order they appeared in the document — section order, then the URL
-        order `_index_entries` already sorted them into. `build_index_diff` re-sorts by
-        `key` for its own samples, so this order is not load-bearing beyond being
-        deterministic for a deterministic input, which `generate_llms_txt` already
-        guarantees.
+        Entries in the order they appeared in the document — main body first (section order,
+        then rank within a section), then Optional flat, the same order `_ordered_entries`
+        already produced them in. `build_index_diff` re-sorts by `key` for its own samples, so
+        this order is not load-bearing beyond being deterministic for a deterministic input,
+        which `generate_llms_txt` already guarantees. `IndexEntry.optional` is set from
+        `section == OPTIONAL_SECTION` as each entry is built — a `## Optional` heading sets
+        `section` exactly like any other, so no separate tracking is needed here beyond that
+        one comparison.
     """
     entries: list[IndexEntry] = []
     section = ""
@@ -313,6 +335,7 @@ def parse_index(llms_txt: str) -> list[IndexEntry]:
                 key=normalize_url(url) or url,
                 title=_unescape_label(raw_label),
                 description=raw_description,
+                optional=section == OPTIONAL_SECTION,
             )
         )
     return entries

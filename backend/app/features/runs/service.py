@@ -548,6 +548,30 @@ def _as_bool(value: Any) -> bool | None:
     return value if isinstance(value, bool) else None
 
 
+def _index_pages(stats: dict[str, Any]) -> int | None:
+    """`links_emitted + links_optional` — the Trends "Index size" tile's number, unchanged in
+    MEANING since before `RUN_STATS_VERSION` 13 even though the underlying key split in two:
+    the tile answers "how many pages are in the artifact," and a page under `## Optional` is
+    still in the artifact (`internals/llms_txt.py`'s `IndexCounts`). Mirrors
+    `runs_reader.py`'s `_WEBSITE_STATS` SQL expression for the identical column read in bulk —
+    see that query's own comment for why the guard has to nest the way it does.
+
+    `None` — unknown, never `0` — when `links_emitted` itself is absent or not an `int`: a row
+    that never produced an index has nothing to report, the same "unknown index size, not a
+    zero one" contract `_WEBSITE_STATS` holds for a bucket with no completed run. Once
+    `links_emitted` IS known, a missing or malformed `links_optional` (every row before version
+    13) contributes `0` rather than making the whole sum `None` — deliberately NOT `or 0`,
+    because a real `0` and a `None` must reach that same `0` contribution by different
+    reasoning, and `x or 0` would also turn a genuine `links_optional: 0` into `0` by
+    coincidence rather than by the guard actually checking anything.
+    """
+    emitted = _as_int(stats.get("links_emitted"))
+    if emitted is None:
+        return None
+    optional = _as_int(stats.get("links_optional"))
+    return emitted + (optional if optional is not None else 0)
+
+
 def _as_content_hashes(value: Any) -> dict[str, str] | None:
     """`value` if it is a `dict` whose every key and value is a `str`, else `None` — for
     `runs.stats["content_hashes"]` (PER-194). A malformed map degrades the join
@@ -665,7 +689,7 @@ def _to_latest(row: dict[str, Any] | None) -> LatestRunSnapshot | None:
         return None
 
     stats = _parse_stats(row["stats"]) or {}
-    index_pages = _as_int(stats.get("links_emitted"))
+    index_pages = _index_pages(stats)
     index_bytes = _as_int(stats.get("llms_txt_bytes"))
     raw_diff = stats.get("index_diff")
 

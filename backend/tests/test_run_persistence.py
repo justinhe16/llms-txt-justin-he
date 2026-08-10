@@ -145,7 +145,7 @@ async def test_success_writes_a_completed_row_with_artifact_storage_path_and_sta
     assert row["completed_at"] is not None
 
     stats = json.loads(row["stats"])
-    assert stats["version"] == 12
+    assert stats["version"] == 13
     assert stats["pages_crawled"] == 1
     assert "cap_hit" in stats
     assert stats["pages_empty_content"] == 1, "the ok_handler's body has no extractable content"
@@ -424,7 +424,7 @@ async def test_partial_stats_survive_an_upload_failure(websites_db: Pool) -> Non
     assert row is not None
     stats = json.loads(row["stats"])
     assert stats["pages_crawled"] == 1
-    assert stats["version"] == 12
+    assert stats["version"] == 13
     # A failure row carries the same KEYS as a success row, at their hoisted defaults — the
     # shape `runs.stats` stores must not depend on how far a run got before it failed. The
     # four PER-180 counters are part of that same guarantee now: this suite's `_execute`
@@ -575,7 +575,13 @@ async def test_the_upload_never_happens_inside_a_database_transaction(
 
 def _diff_page(path: str, *, title: str = "Page") -> CrawledPage:
     """A `CrawledPage` with real, non-empty content — shaped so `generate_llms_txt` lists it,
-    which is the precondition for it showing up on either side of a diff."""
+    which is the precondition for it showing up on either side of a diff.
+
+    `markdown` is unique per `path`, deliberately — `internals/llms_txt.py`'s dedup pass now
+    fingerprints on the body alone, so two DIFFERENT pages built with the same literal string
+    would silently collapse into one entry inside a single run's index, which is exactly wrong
+    for a helper whose whole purpose is producing multiple distinct pages for a diff to compare
+    across runs."""
     return CrawledPage(
         url=f"http://{_SEED_IP}{path}",
         status=200,
@@ -584,7 +590,7 @@ def _diff_page(path: str, *, title: str = "Page") -> CrawledPage:
         fetched_at=datetime.now(UTC),
         content_bytes=1,
         description=None,
-        markdown="Real content, long enough to survive extraction's emptiness check here.",
+        markdown=f"Real content for {path}, long enough to survive extraction's emptiness check.",
         is_empty=False,
         blocked_reason=None,
     )
@@ -1039,12 +1045,13 @@ async def test_a_site_with_no_sitemap_falls_back_to_the_links_on_its_seed_page(
     assert stats["urls_discovered"] == 3, "off-origin, mailto: and fragment-only never count"
     assert stats["urls_selected"] == 3
     assert stats["pages_crawled"] == 4
-    assert stats["version"] == 12, (
+    assert stats["version"] == 13, (
         "a new VALUE for an existing key is still not a new shape — PER-178 added "
-        '`discovery_source: "links"` and deliberately did not bump for it. This row reads 11 '
-        "because PER-180, PER-191, PER-193, PER-194, PER-196, PER-201, and this repo's own "
-        "WAF-detection ticket each added new KEYS after that, which are shape changes; the "
-        "number moved for reasons that have nothing to do with the value asserted above."
+        '`discovery_source: "links"` and deliberately did not bump for it. This row reads 13 '
+        "because PER-180, PER-191, PER-193, PER-194, PER-196, PER-201, this repo's own "
+        "WAF-detection ticket, the pages_http_error/pages_off_origin ticket, and the "
+        "curated-`llms.txt` ticket each added new KEYS after that, which are shape changes; "
+        "the number moved for reasons that have nothing to do with the value asserted above."
     )
 
 
@@ -1431,7 +1438,7 @@ async def test_model_titles_reach_llms_txt_and_the_extracted_title_does_not(
     assert "Extracted Title Nobody Should See In The Artifact" not in row["llms_txt"]
 
     stats = json.loads(row["stats"])
-    assert stats["version"] == 12
+    assert stats["version"] == 13
     assert stats["pages_enriched"] == 1
     assert stats["enrich_failures"] == 0
 
@@ -2248,14 +2255,14 @@ async def test_an_unreadable_robots_txt_completes_the_run(websites_db: Pool) -> 
     assert stats["crawl_delay_ms"] == settings.crawl_politeness_delay_ms
 
 
-async def test_stats_version_is_eleven(websites_db: Pool) -> None:
-    """[Observability]. A live row lands with `RUN_STATS_VERSION` 11 — the persistence-layer
+async def test_stats_version_is_thirteen(websites_db: Pool) -> None:
+    """[Observability]. A live row lands with `RUN_STATS_VERSION` 13 — the persistence-layer
     companion to `tests/test_run_stats.py::test_run_stats_version_is_pinned`, which only
     checks the constant itself. `max_pages` (version 10, PER-201) is asserted alongside it,
     because a version number that moved without an earlier version's own key still arriving
     would be the one failure this test exists to catch and the constant-only test structurally
-    cannot — a version-11 row carries every version-10 key too, `max_pages` included, not just
-    the two this ticket (`pages_blocked`, `blocked_reason`) adds on top."""
+    cannot — a version-13 row carries every version-10 key too, `max_pages` included, not just
+    `links_optional`/`links_duplicate` (the curated-index ticket's own two)."""
     _website_id, run_id = await _seed_pending_clean_origin(websites_db, "version-eleven")
     storage = FakeStorage()
 
@@ -2270,7 +2277,7 @@ async def test_stats_version_is_eleven(websites_db: Pool) -> None:
     row = await websites_db.fetchrow("SELECT stats FROM runs WHERE id = $1", run_id)
     assert row is not None
     stats = json.loads(row["stats"])
-    assert stats["version"] == 12
+    assert stats["version"] == 13
     assert stats["max_pages"] == settings.crawl_max_pages
     assert stats["pages_blocked"] == 0
     assert stats["blocked_reason"] is None

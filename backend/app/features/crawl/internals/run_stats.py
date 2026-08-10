@@ -47,7 +47,7 @@ from typing import Any, Final
 
 logger = logging.getLogger(__name__)
 
-RUN_STATS_VERSION: Final = 12
+RUN_STATS_VERSION: Final = 13
 """Which definition of this whole dict's shape a stored row was written under — not just
 `links_emitted`'s meaning, but which KEYS a row of this version even has.
 
@@ -400,13 +400,56 @@ crawl met a WAF, and there is no per-page detail on either key for `_public_stat
 reason to redact — both are aggregate counts across the whole run, the same shape
 `pages_empty_content` already is.
 
-Every version-10 key keeps its version-10 meaning here."""
+Every version-10 key keeps its version-10 meaning here.
+
+**Version 13** rows add two keys and redefine one — `llms.txt`'s curated-index ticket
+(`internals/llms_txt.py`), the second time this key has changed meaning (the first was
+version 3, PER-179, when it stopped meaning "one bullet per fetched page" and started meaning
+"one bullet per surviving page").
+
+**The redefinition:** `links_emitted` now counts ONLY the main-body links — the bullets before
+`## Optional` — not every link the artifact lists. Before this version, `links_emitted` was
+every page the index listed anywhere; a curated index demotes some surviving pages to
+`## Optional` rather than dropping them, so "how many links does the index list" split into
+two questions the moment Optional existed, and `links_emitted` answers the one about the main
+body specifically — the number a reader of `runs.stats` most likely means by "how big is this
+site's index."
+
+**The new keys:** `links_optional` is how many landed under `## Optional` instead — demoted by
+an always-Optional rule (legal boilerplate, brand assets, archives) or by the main-body cap,
+never dropped from the artifact entirely. `links_duplicate` is how many fetched, on-origin,
+non-empty, 2xx pages this run's OWN dedup pass collapsed into an already-kept survivor —
+fetched, real, and still not a link anywhere in the artifact, which is what makes it the fourth
+member of a family `pages_http_error`/`pages_off_origin` (version 12) already started: a named
+reason a fetched page did not reach the index, so `pages_crawled` minus every one of these four
+reasons (`pages_empty_content`, `pages_http_error`, `pages_off_origin`, `links_duplicate`)
+minus `links_emitted` minus `links_optional` closes to zero, which
+`frontend/lib/crawls/run-provenance.ts`'s own invariant test now asserts directly (that file's
+own module docstring numbers the reasons it can name; this ticket adds the fourth it was
+missing, alongside the fifth "listed under Optional" bucket that is not an EXCLUSION at all).
+
+Both new keys are recorded on every completed OR partially-completed row from this version
+onward — `internals/llms_txt.py`'s `IndexCounts` is what only that module can compute, and
+`0` is a real, recorded value for both, in exactly the sense every other zero in this dict is
+(version 5's own paragraph states the rule this repeats): a run whose index has no Optional
+section records `links_optional: 0`, not an absent key, and a run whose dedup pass found
+nothing to collapse records `links_duplicate: 0` the same way.
+
+**Both keys are EXPOSED, not worker-only**, the same choice version 12 made for
+`pages_http_error`/`pages_off_origin`: a signed-in user watching their own run is exactly who
+benefits from seeing how many of their site's pages were folded together as duplicates or
+tucked under Optional, and neither key carries any per-page detail `runs/service.py`'s
+`_public_stats` would have reason to redact.
+
+Every version-12 key keeps its version-12 meaning here, `links_emitted` excepted — see above."""
 
 
 def build_run_stats(
     crawl_stats: Mapping[str, Any],
     *,
     links_emitted: int,
+    links_optional: int,
+    links_duplicate: int,
     full_txt_truncated: int,
     discovery_source: str,
     urls_discovered: int,
@@ -456,21 +499,31 @@ def build_run_stats(
             knows which cap (if any) actually stopped a run, or which responses it saw were
             blocked and how, and recomputing either downstream from partial information would
             risk disagreeing with the very component that decided it.
-        links_emitted: The number of links the generated `llms.txt` artifact lists —
-            `internals/llms_txt.py`'s `count_indexed_pages`, and nothing a caller derived for
-            itself. **This diverged from `crawl_stats["pages_crawled"]` in PER-179**, exactly
-            as the stub-era version of this docstring predicted it would: the artifact omits
-            pages whose extraction came back empty, so a run that fetched ten pages and found
-            content on seven records `pages_crawled: 10, links_emitted: 7`. `version: 3` is
-            what tells a future reader which of the two rules produced a given row's number
-            (see `RUN_STATS_VERSION`); a version-2 row's `links_emitted` is one-per-page and
-            says nothing about the artifact.
+        links_emitted: How many links the generated `llms.txt` artifact's MAIN BODY lists —
+            `internals/llms_txt.py`'s `count_indexed_pages(...).main`, and nothing a caller
+            derived for itself. **Redefined a second time at version 13** — see
+            `RUN_STATS_VERSION`'s own version-13 paragraph for the full history: version 3
+            (PER-179) made it "pages the artifact lists, not one-per-fetched-page"; this ticket
+            narrows it further to "pages the MAIN BODY lists, not the whole artifact," now that
+            a curated index also has an `## Optional` section. `version: 13` is what tells a
+            future reader which of the three rules produced a given row's number.
 
             Still recorded as its own key rather than derived at read time from
-            `pages_crawled` minus `pages_empty_content`, and the divergence is precisely why:
-            that subtraction is only correct for as long as "empty" is the ONLY reason a page
-            can be left out, which is a property of today's selection rule rather than of the
-            data. Ask the artifact what it listed; do not reconstruct it.
+            `pages_crawled` minus some subtraction, and the divergence is precisely why: that
+            subtraction is only correct for as long as today's selection rules are the ONLY
+            ones, which is a property of this module's current logic rather than of the data.
+            Ask the artifact what it listed; do not reconstruct it.
+        links_optional: How many links landed under `## Optional` instead of the main body —
+            `internals/llms_txt.py`'s `count_indexed_pages(...).optional`. New at version 13.
+            Demoted, never dropped: every one of these is still a link in the artifact, in
+            `llms-full.txt` too, just not in the curated main body.
+        links_duplicate: How many fetched, on-origin, non-empty, 2xx pages this run's own dedup
+            pass collapsed into an already-kept survivor — `internals/llms_txt.py`'s
+            `count_indexed_pages(...).duplicate`. New at version 13, and the fourth named
+            reason (alongside `pages_empty_content`, `pages_http_error`, `pages_off_origin`)
+            a fetched page can fail to reach the index — see `RUN_STATS_VERSION`'s own
+            version-13 paragraph for why it had to become its own key rather than being
+            silently invisible to every other named reason.
         full_txt_truncated: How many pages the `llms-full.txt` artifact could not carry in
             full — `internals/llms_txt.py`'s `count_full_txt_truncations`, which owns the
             definition (both the per-page cut and the whole-artifact drop count). New in
@@ -572,18 +625,20 @@ def build_run_stats(
             by `runs/service.py`'s `_public_stats` before it ever reaches a client.
 
     Returns:
-        `crawl_stats` spread first, followed by `links_emitted`, `full_txt_truncated`,
-        `discovery_source`, `urls_discovered`, `urls_selected`, `urls_robots_disallowed`,
-        `dropped`, `max_pages`, `crawl_delay_ms`, `pages_enriched`, `enrich_failures`,
-        `enrich_input_tokens`, `enrich_output_tokens`, `llms_txt_bytes`, `index_diff`,
-        `enrich_requested`, `enrich_applied`, `enrich_unavailable_reason`, `content_hashes`,
-        and `version`. `crawl_stats`'s own keys come first and are never overwritten by the
-        twenty added here, because none of those twenty names is a key `CrawlResult.stats`
-        has ever produced.
+        `crawl_stats` spread first, followed by `links_emitted`, `links_optional`,
+        `links_duplicate`, `full_txt_truncated`, `discovery_source`, `urls_discovered`,
+        `urls_selected`, `urls_robots_disallowed`, `dropped`, `max_pages`, `crawl_delay_ms`,
+        `pages_enriched`, `enrich_failures`, `enrich_input_tokens`, `enrich_output_tokens`,
+        `llms_txt_bytes`, `index_diff`, `enrich_requested`, `enrich_applied`,
+        `enrich_unavailable_reason`, `content_hashes`, and `version`. `crawl_stats`'s own keys
+        come first and are never overwritten by the twenty-two added here, because none of
+        those twenty-two names is a key `CrawlResult.stats` has ever produced.
     """
     stats = {
         **crawl_stats,
         "links_emitted": links_emitted,
+        "links_optional": links_optional,
+        "links_duplicate": links_duplicate,
         "full_txt_truncated": full_txt_truncated,
         "discovery_source": discovery_source,
         "urls_discovered": urls_discovered,

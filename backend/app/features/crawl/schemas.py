@@ -206,8 +206,9 @@ class CrawlOutcome:
     stats: dict[str, Any]
     """The same shape `runs.stats` stores as jsonb — built by `internals/run_stats.py`'s
     `build_run_stats`: `pages_crawled`, `pages_failed`, `bytes_fetched`, `duration_ms`,
-    `cap_hit`, `pages_empty_content`, `links_emitted`, `full_txt_truncated`, and `version`.
-    Typed loosely
+    `cap_hit`, `pages_empty_content`, `links_emitted` (main-body links only, as of
+    `RUN_STATS_VERSION` 13), `links_optional`, `links_duplicate`, `full_txt_truncated`, and
+    `version`. Typed loosely
     (`dict[str, Any]`) to match `app.features.runs.schemas.RunListItemResponse.stats`, which
     reads this same column back out with the same justification — the shape belongs to this
     feature, which is why it is built here rather than validated against a model owned by

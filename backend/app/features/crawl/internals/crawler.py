@@ -241,6 +241,43 @@ class CrawlResult:
     keep working unchanged.
     """
 
+    seed_page_url: str | None = None
+    """WHICH PAGE in `pages` is the seed — `seed_page.url`, the seed's own final,
+    post-redirect URL. Set beside `seed_origin`, on the same success branch, for the same
+    reason: both are facts about where the seed actually landed, known only at that one call
+    site.
+
+    **Not `seed_origin`.** `seed_origin` is an origin — scheme and host only — and exists to
+    be printed (`generate_llms_txt`'s "an index of N pages from {origin}"). This field is a
+    full URL, and exists to be looked up: `internals/llms_txt.py`'s `PageSignals` needs to
+    know which `CrawledPage` in `pages` is the seed so it can read that page's own `content`
+    and extract `linked_from_seed` from its links — the seed's own curation of the site,
+    which is the strongest ranking signal that module has (ARCHITECTURE.md §3.4's curated-index
+    paragraph).
+
+    **Not the same page as the origin's root**, either, when the seed redirects to a non-root
+    path — `/` -> `/en/`, `/` -> `/home`, both observed in practice. `internals/llms_txt.py`'s
+    `_root_page` (the blockquote's source) and this field can therefore name two different
+    pages in `pages` on the same run; the module docstring's "seed page and root page" section
+    says why both are needed.
+
+    **Why not `pages[0]`.** `crawler.py` happens to append the seed before any frontier page
+    today, so `pages[0]` would work — but that is positional semantics leaking into a codebase
+    that already models "the seed" as a named fact (`seed_origin` beside it). A future change
+    to append order would silently break a caller reading position instead of this field.
+
+    **Why not `_project_name`'s root-page lookup.** That lookup finds the page at the origin's
+    root (empty path, no query) — which silently degrades to no signal at all for a run whose
+    seed redirects to a non-root path, exactly the case this field exists to still cover.
+    `/` -> `/en/` and `/` -> `/home` are common enough on real sites that this would not be a
+    rare miss.
+
+    `None` on every seed-failure path — mirrors `seed_origin`'s own default, for the identical
+    reason: there is no seed page in `pages` to name. Defaulted, not required, so the ~18
+    hand-built `CrawlResult` constructions in `tests/test_run_persistence.py` keep working
+    unchanged.
+    """
+
 
 class RobotsDisallowedError(Exception):
     """Raised (as `CrawlResult.seed_error`) when the run's own `is_allowed` predicate refuses
@@ -490,6 +527,7 @@ async def crawl_site(
     pages_http_error = 0
     pages_off_origin = 0
     seed_origin: str | None = None
+    seed_page_url: str | None = None
     cap_hit: str | None = None
     seed_error: Exception | None = None
 
@@ -681,6 +719,10 @@ async def crawl_site(
                         # (`_same_origin_as_seed`). Set from the seed's FINAL url, so a site
                         # that moved hosts wholesale is crawled at the host it moved to.
                         seed_origin = _origin_of(seed_page.url)
+                        # WHICH PAGE in `pages` is the seed — see `seed_page_url`'s own
+                        # docstring. Set here, beside `seed_origin`, because this is the one
+                        # place both facts about the seed's landing are known at once.
+                        seed_page_url = seed_page.url
                         pages.append(seed_page)
 
                         # The frontier, from whichever of the two sources supplied one. The
@@ -766,4 +808,5 @@ async def crawl_site(
         cap_hit=cap_hit,
         seed_error=seed_error,
         seed_origin=seed_origin,
+        seed_page_url=seed_page_url,
     )

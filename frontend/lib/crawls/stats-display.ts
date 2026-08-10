@@ -185,7 +185,11 @@ export interface TrendPoint {
    * recorded an index size. The genuine gap `IndexSizeChart`'s `connectNulls={false}` must
    * break the line across, rather than a quiet-hour zero a line should pass straight through. */
   indexKb: number | null;
-  /** `index_pages`, same null-vs-zero rule as `indexKb` — always from the same run. */
+  /** `index_pages` — `links_emitted + links_optional` as of `RUN_STATS_VERSION` 13, so this
+   * still means "pages in the artifact" now that some of them render under `## Optional`
+   * rather than the main body (`internals/llms_txt.py`'s `IndexCounts`). The backend computes
+   * the sum; this field is a straight pass-through. Same null-vs-zero rule as `indexKb` —
+   * always from the same run. */
   indexPages: number | null;
   /** `pages_added`, unchanged — a real `0` when nothing was added or nothing was compared. */
   added: number;

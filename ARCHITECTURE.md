@@ -279,28 +279,50 @@ module (`internals/llms_txt.py`):
 
 ```python
 def generate_llms_txt(                                       # the llms.txt index
-    pages: list[CrawledPage], *, site_url: str
+    pages: list[CrawledPage], *, site_url: str,
+    signals: Mapping[str, PageSignals] | None = None,
 ) -> str:
     ...
 
 def generate_llms_full_txt(                                  # the llms-full.txt expansion
-    pages: list[CrawledPage], *, site_url: str
+    pages: list[CrawledPage], *, site_url: str,
+    signals: Mapping[str, PageSignals] | None = None,
 ) -> str:
     ...
 ```
 
-**This was a stub seam until PER-179, and is now an implementation.** The paragraph that
-stood here said the pipeline "has not been designed yet" and that the function behind it was
-a deterministic stand-in. That is no longer true, and the boundary it drew moved rather than
-disappeared. What is now decided, and decided *here*: which fetched pages the artifact lists,
-how they are grouped and ordered, what each is called, and what the expansion contains. What
-is still out of scope, and out of scope for a reason rather than for want of a ticket: calling
-a model **inside this seam**. That is no longer the same as "calling a model at all" — PER-180
-added exactly that, one layer up, in `internals/enrich.py` (see the new paragraph below and
-§11) — but `generate_llms_txt` and `generate_llms_full_txt` themselves still take a
-`list[CrawledPage]` and return `str` with no network call anywhere inside either one, and that
-half of the sentence remains true precisely because the model-calling layer was built beside
-this module rather than into it.
+**This was a stub seam until PER-179, a one-bullet-per-page dump from PER-179 onward, and is
+now a curated index.** The paragraph that first stood here said the pipeline "has not been
+designed yet"; PER-179 designed it as "every surviving page gets a bullet, alphabetized under
+its leading path segment." External review of that shape on a real site (90 links, ~19 KB, the
+homepage filed under "Other") found it read like a crawl dump rather than an index a model or
+a person would want handed to it first — this ticket is the second redesign of the same seam,
+narrowing WHICH of a run's pages the main body actually lists and how they are ranked, not
+widening what the seam is allowed to do. What is still out of scope, and out of scope for a
+reason rather than for want of a ticket: calling a model **inside this seam**. That is no
+longer the same as "calling a model at all" — PER-180 added exactly that, one layer up, in
+`internals/enrich.py` (see the new paragraph below and §11) — but `generate_llms_txt` and
+`generate_llms_full_txt` themselves still take a `list[CrawledPage]` and return `str` with no
+network call anywhere inside either one, and that half of the sentence remains true precisely
+because the model-calling layer was built beside this module rather than into it.
+
+**`signals` is the seam's second widening, and selection stays IDENTICAL whether or not a
+model ever ran.** `PageSignals` (`linked_from_seed`, `sitemap_priority`, `lastmod`) is metadata
+a discovery step already collected before any page was fetched — the identical argument
+`internals/url_ranking.py` makes for its own ranking pass being outside CLAUDE.md #9's
+prohibition — so reading it is not a breach of "no model, no network" any more than reading
+`CrawledPage.status` is. `signals=None` degrades every page to the least-informative value of
+each field, which is what every hand-built test fixture that predates this ticket still gets.
+Separately, and just as load-bearing: `internals/enrich.py`'s flag-gated pass can rewrite a
+page's `title` and `description` — and, on its own wall-clock timeout, rewrite only SOME of a
+run's pages, keeping the rest at their extracted values, which its own docstring calls the
+intended behaviour rather than a degraded case. Every stage of selection (which pages are
+indexed, which section each lands in, whether it is always-Optional, its dedup identity, its
+rank) reads only `url`, `origin`, `markdown`, and `signals` — never `title` or `description` —
+so a run's selection, grouping, main-body/Optional split, and page order are all identical
+regardless of which pages enrichment touched, or whether it ran at all. Only a page's LABEL —
+the H1, the blockquote, and each bullet's title/description — is free to vary with the flag,
+because a label is not a selection decision.
 
 **The seam widened once, to take `site_url`, and the reason is worth stating because it is
 the argument against widening it again.** Both functions previously derived the origin they
@@ -326,34 +348,87 @@ codebase is an import collision waiting to happen. The rename changes nothing ab
 seam's shape — one argument, a list of fetched pages, returns `str` — only the element
 type's name.
 
-Build against those signatures. PER-179 added the sibling; the element type and the return
-type are still fixed, and neither may be widened without a ticket that redesigns this seam.
-Do not scatter crawling, parsing, or LLM-calling logic through the services.
+Build against those signatures. PER-179 added the sibling; this ticket added `signals` — the
+seam's SECOND widening, and it is the one CLAUDE.md #9 and this section both required a ticket
+that redesigns the seam before making, which is what the paragraph above is. The element type
+and the return type are still fixed, and nothing here may be widened a THIRD time without a
+ticket that redesigns this seam again and updates both documents the same way this one did. Do
+not scatter crawling, parsing, or LLM-calling logic through the services.
 
-**The format.** `llms.txt` follows llmstxt.org: exactly one H1 naming the project, exactly
-one blockquote summarizing it, then an H2 per section holding
-`- [title](url): description` bullets.
+**The format.** `llms.txt` follows llmstxt.org's own shape: exactly one H1 naming the project,
+exactly one blockquote, zero or more free-prose blocks (no heading), then an H2 per curated
+section holding ranked `- [title](url): description` bullets, capped at `MAX_MAIN_BODY_LINKS`
+(30) and closed by a final `## Optional` when anything was demoted rather than dropped.
 
 * **Project name** — the title of the page at the origin's root, else the origin itself. A
   deep page's title describes that page, not the site, so it is never promoted to the H1.
   The root page is consulted even when it is `is_empty`, because a JavaScript shell keeps a
   real `<title>` and a documentation SPA's homepage is exactly that.
-* **Blockquote** — the indexed page count and the origin, plus what was excluded. Factual and
-  countable; it makes no claim about quality and no longer disclaims itself.
-* **Sections** — the page's leading path segment, made readable. A small curated table fixes
-  what humanizing gets wrong (`api` → API) and merges synonyms (`doc`/`docs`/`documentation`
-  → Docs); every other segment becomes its own title-cased section, so a site using `/blog/`
-  or `/getting-started/` gets a real heading rather than a bucket. `Other` catches pages with
-  no leading segment and segments that yield no readable name. Order is fixed: curated
-  sections first, then the rest alphabetically, then `Other`.
+* **Blockquote** — a sentence about the SITE, in its own words: the root page's own
+  description (or, failing that, its first markdown paragraph), never a count of pages or a
+  claim about the generator. A run whose root page has neither falls back to a plain count
+  sentence, the last resort rather than the norm.
+* **The free-prose block** — llmstxt.org's own optional element, added by this ticket: the
+  root page's own first substantial paragraph, when it exists and is not near-identical to the
+  blockquote (sites routinely lift `og:description` from their own hero copy), and — only when
+  this run's index actually has an `## Optional` section — one fixed sentence explaining that
+  convention. Either, both, or neither may appear.
+* **Sections** — a canonical taxonomy matched on URL path segments (`Overview`, `Product`,
+  `Docs`, `Guides`, `API`, `Reference`, `Research & Data`, `Comparisons`, `Customers`,
+  `Company`, `Blog`, in that order), falling back to the leading path segment humanized for
+  anything the table does not claim. `Overview` matches the origin's own root page and nothing
+  else, which is what stops a homepage being filed under a generic bucket. A DERIVED section
+  (never a canonical one) that survives with fewer than two entries folds into `Other`.
+  **Matched on URL segments alone, deliberately never on a page's title or label** — see
+  "Selection is enrichment-invariant," below.
+* **Ranking, the cap, and Optional** — surviving pages are ranked on the seed page's own links
+  (the strongest signal — a site's own homepage curating its own site), path depth, section
+  weight, markdown length, and the sitemap's `priority`/`lastmod` (via `signals`), all
+  clock-free and all flag-independent. A fixed list of always-Optional rules (legal
+  boilerplate, brand assets, taxonomy archives, dated archives) — matched on URL segments only,
+  restated here even though `internals/url_ranking.py` already drops most of them at the
+  frontier, because this seam is not entitled to assume its input was already filtered — and
+  the `MAX_MAIN_BODY_LINKS` cap together decide what renders in the main body; everything else
+  renders flat, in rank order, under `## Optional`, still fully present in `llms-full.txt`. A
+  main body that would otherwise end up empty (a site that is entirely legal pages and
+  archives) is never left that way: the highest-ranked entries are promoted back in, up to the
+  same cap, rather than producing a document that reads as broken.
+* **Dedup** — two surviving pages whose cleaned label and markdown body hash match are folded
+  into one, keeping the highest-ranked; the artifact never lists the same content twice under
+  two URLs.
 * **Skipped pages** — a page whose extraction came back empty (`CrawledPage.is_empty`) is
-  omitted. This is the ONE place in the codebase that branches on that flag.
+  omitted from selection entirely (not merely demoted to Optional). This is the ONE place in
+  the codebase that branches on that flag.
 
-`llms-full.txt` carries the same H1 and a blockquote of its own, then `## {title}` and that
-page's markdown per page, **in the index's order** — section order, then URL order within a
-section — so the two files can be read side by side. It deliberately does not copy
-Firecrawl's `<|firecrawl-page-N-lllmstxt|>` separators, which that implementation emits and
-then strips out again with a regex before anything consumes them.
+**Selection is enrichment-invariant.** `internals/enrich.py`'s pass keeps partial results on
+its own wall-clock timeout — summarizing 80 of a run's 100 pages and falling back to extraction
+for the other 20 is its own docstring's example of the INTENDED behaviour, not a degraded one
+— so a mix of model-written and extraction-derived labels inside one run is the common case,
+not an edge case. Every stage that DECIDES something (a page's section, whether it is
+always-Optional, its dedup identity, its rank) reads only `url`, `origin`, and `markdown`,
+never `title` or `description`: which pages are indexed, how they are grouped, the main-body/
+Optional split, and their order are therefore IDENTICAL whether enrichment ran, on which pages
+it succeeded, or not at all. Only a label — the H1, the blockquote, a bullet's title and
+description — is free to vary with the flag, because a label is not a selection decision, and
+letting the model layer improve labels is the entire point of building it above this seam.
+
+**The shape invariant.** For ANY input, both artifacts hold: exactly one H1, first line;
+exactly one blockquote, immediately after it; no heading inside the free-prose block; at least
+one `## ` section whenever at least one page is indexed; no `## ` section with zero bullets
+under it; at most one `## Optional`, and it is last; the document ends in exactly one trailing
+newline. This is the acceptance criterion the curated-index ticket is actually held to — every
+run, on any site, should read like a good hand-written index, not merely a technically valid
+document — independent of how well the taxonomy or the ranking weights happen to be tuned for
+any one site. `internals/llms_txt.py`'s own test suite asserts it directly, over a matrix of
+degenerate inputs (zero pages, a root-only run, every page always-Optional, hundreds of pages,
+and more), rather than leaving it implied by a single golden-file test.
+
+`llms-full.txt` carries the same H1, a blockquote and free-prose block of its own, then
+`## {title}` and that page's markdown per page — EVERYTHING the index does, main body then
+Optional, **in the index's order** — section order, then rank within a section — so the two
+files can be read side by side. It deliberately does not copy Firecrawl's
+`<|firecrawl-page-N-lllmstxt|>` separators, which that implementation emits and then strips
+out again with a regex before anything consumes them.
 
 **The caps, and why they are not `crawl_max_bytes`.** The expansion is inlined into a
 Postgres column, so it is bounded in its own right: **50 KiB per page** (trimmed, and marked
@@ -368,8 +443,14 @@ eight-megabyte `<title>` produces an eight-megabyte artifact header before the p
 consulted at all. URLs are deliberately left unbounded: a truncated URL is a broken link, and
 the place to decline an over-long one is the frontier, before it is fetched.
 `runs.stats["full_txt_truncated"]` counts the pages that lost content either way, and
-`links_emitted` counts the bullets actually emitted — which is why it diverges from
-`pages_crawled` from `RUN_STATS_VERSION` 3 onwards (§6.4).
+`links_emitted` counts the MAIN-BODY bullets emitted — a second redefinition, at
+`RUN_STATS_VERSION` 13, of a key that first diverged from `pages_crawled` at version 3
+(§6.4): version 3 made it "pages the artifact lists" rather than "one per fetched page," and
+this ticket narrows it to "pages the main body lists," now that some surviving pages render
+under `## Optional` instead. `links_optional` (new at version 13) is that other half, and
+`links_duplicate` (also new) is a fourth named reason — alongside `pages_empty_content`,
+`pages_http_error`, and `pages_off_origin` — a fetched page can fail to reach the index at
+all: this run's own dedup pass collapsed it into an already-kept survivor.
 
 **Both functions are pure**: no network, no clock, no I/O, no settings read. They sort by URL
 before deriving anything, and every ordering decision ends in a total tie-break, so a
