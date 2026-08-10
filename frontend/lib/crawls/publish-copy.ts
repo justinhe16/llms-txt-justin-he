@@ -66,7 +66,7 @@ interface GithubConnectCopy {
  * is after a second detour: `middleware.ts` gates `/crawls/[id]`, so this outcome's own redirect
  * bounces again, through `/?next=…`, before landing back on the Publish tab post sign-in. "You
  * weren't signed in" has to still make sense to someone who, from their own point of view, just
- * finished signing in — see R2 in the PR description for the full chain.
+ * finished signing in.
  */
 export const GITHUB_CONNECT_COPY: Record<GithubCallbackResult, GithubConnectCopy> = {
   connected: {

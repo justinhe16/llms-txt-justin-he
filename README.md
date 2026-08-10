@@ -280,7 +280,7 @@ takes one manual step nothing in this repo can do for you — registering a GitH
 | Setup URL | greyed out — see below |
 | Callback URL | `https://llms-text-justin-he-gamma.vercel.app/api/github/callback` |
 | Request user authorization (OAuth) during installation | on |
-| Redirect on update | on |
+| Redirect on update | off — see below, it's a no-op in this configuration |
 | Webhook | **off** — nothing here listens for one |
 
 **Repository permissions — exactly two**, and no account permissions at all: **Contents: Read and
@@ -288,16 +288,24 @@ write** (the commit) and **Pull requests: Read and write** (the default `pull_re
 Every extra permission is a reason for a user to decline the install.
 
 **Setup URL vs. Callback URL, and why only one field is set.** GitHub distinguishes the two: the
-setup URL is where an install lands, the callback URL is where an *authorization* lands. Turning
-on "Request user authorization (OAuth) during installation" folds the two into one flow — GitHub
-disables the Setup URL field in its own UI and sends every post-install redirect to the callback
-URL instead, with a `code` appended. That is why this table sets only the Callback URL: with the
-toggle on, the Setup URL field cannot be set at all. If the toggle is ever turned off, set the
-Setup URL to the same `/api/github/callback` address — the route reads only `installation_id`,
-`setup_action`, and `state`, none of which depend on how the user arrived, so it works unchanged
-either way. **Redirect on update** matters independently of that toggle: without it, a user who
-revisits GitHub to change which repositories are granted lands on a generic GitHub page instead
-of back on their site's Publish tab.
+setup URL is where an install lands (and, if **Redirect on update** is on, where a later change
+to granted repositories lands too), the callback URL is where an *authorization* lands. Turning
+on "Request user authorization (OAuth) during installation" folds the two into one flow — GitHub's
+own [App-registration docs](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app)
+say the toggle means "you will not be able to enter a URL here," and every post-install redirect
+goes to the Callback URL instead, with a `code` appended. That is why this table sets only the
+Callback URL: with the toggle on, the Setup URL field cannot be set at all — and the same docs say
+**Redirect on update** "will be ignored" whenever Setup URL is blank, so checking it here would do
+nothing. In this exact configuration, a user who revisits GitHub to change which repositories are
+granted lands on GitHub's own installation-settings page, not back on the Publish tab, and there
+is currently no way to change that while the OAuth toggle stays on.
+
+If the toggle is ever turned off, set the Setup URL to the same `/api/github/callback` address —
+the route reads only `installation_id`, `setup_action`, and `state`, none of which depend on how
+the user arrived, so it works unchanged either way. That also makes **Redirect on update** live:
+turn it on and GitHub will send the user back through that same Setup URL — and so back to the
+Publish tab — after they add or remove a repository from an existing installation, not only after
+the initial install.
 
 **The `code` this route never reads is a known gap, not an oversight.**
 `PublishService.connect_installation` verifies the installation id against GitHub with this

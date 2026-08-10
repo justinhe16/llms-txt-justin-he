@@ -179,10 +179,9 @@ export function WebsiteDetail({ websiteId }: { websiteId: string }) {
             className="mt-8 min-w-0"
           >
             {/* `overflow-x-auto`: five triggers at `flex-none px-3` no longer fit inside a
-                375px viewport without it — see R1 in the PR description. Fixed here, in the
-                app-specific consumer, rather than in `components/ui/tabs.tsx` — §8.4 forbids
-                app-specific edits to a generated primitive that every other `<Tabs>` in this
-                app also renders. */}
+                375px viewport without it. Fixed here, in the app-specific consumer, rather than
+                in `components/ui/tabs.tsx` — ARCHITECTURE.md §8.4 forbids app-specific edits to
+                a generated primitive that every other `<Tabs>` in this app also renders. */}
             <TabsList
               variant="line"
               className="w-full justify-start overflow-x-auto border-b border-border"

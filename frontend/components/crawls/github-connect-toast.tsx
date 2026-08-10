@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { toast } from "sonner";
 
@@ -86,12 +86,12 @@ export function CrawlsGithubConnectToast() {
   const raw = searchParams.get(GITHUB_RESULT_PARAM);
   const result = isGithubCallbackResult(raw) ? raw : null;
 
-  const clear = () => {
+  const clear = useCallback(() => {
     const params = new URLSearchParams(searchParams.toString());
     params.delete(GITHUB_RESULT_PARAM);
     const query = params.toString();
     router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false });
-  };
+  }, [pathname, router, searchParams]);
 
   return <GithubConnectToast result={result} onShown={clear} />;
 }
