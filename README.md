@@ -277,13 +277,49 @@ takes one manual step nothing in this repo can do for you — registering a GitH
 | Field | Value |
 | --- | --- |
 | Homepage URL | `https://llms-text-justin-he-gamma.vercel.app` |
+| Setup URL | greyed out — see below |
 | Callback URL | `https://llms-text-justin-he-gamma.vercel.app/api/github/callback` |
 | Request user authorization (OAuth) during installation | on |
+| Redirect on update | off — see below, it's a no-op in this configuration |
 | Webhook | **off** — nothing here listens for one |
 
 **Repository permissions — exactly two**, and no account permissions at all: **Contents: Read and
 write** (the commit) and **Pull requests: Read and write** (the default `pull_request` mode).
 Every extra permission is a reason for a user to decline the install.
+
+**Setup URL vs. Callback URL, and why only one field is set.** GitHub distinguishes the two: the
+setup URL is where an install lands (and, if **Redirect on update** is on, where a later change
+to granted repositories lands too), the callback URL is where an *authorization* lands. Turning
+on "Request user authorization (OAuth) during installation" folds the two into one flow — GitHub's
+own [App-registration docs](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app)
+say the toggle means "you will not be able to enter a URL here," and every post-install redirect
+goes to the Callback URL instead, with a `code` appended. That is why this table sets only the
+Callback URL: with the toggle on, the Setup URL field cannot be set at all — and the same docs say
+**Redirect on update** "will be ignored" whenever Setup URL is blank, so checking it here would do
+nothing. In this exact configuration, a user who revisits GitHub to change which repositories are
+granted lands on GitHub's own installation-settings page, not back on the Publish tab, and there
+is currently no way to change that while the OAuth toggle stays on.
+
+If the toggle is ever turned off, set the Setup URL to the same `/api/github/callback` address —
+the route reads only `installation_id`, `setup_action`, and `state`, none of which depend on how
+the user arrived, so it works unchanged either way. That also makes **Redirect on update** live:
+turn it on and GitHub will send the user back through that same Setup URL after they add or remove
+a repository from an existing installation, not only after the initial install. They land on
+`/crawls` rather than on a site's Publish tab, though, and that is not a gap to close here: `state`
+is attached by the install link in `ConnectPrompt`, which only renders while the account has no
+installation at all. A user editing an existing installation's repository access gets there through
+GitHub's own settings page, which has no `state` to echo back — so `githubCallbackPath` sees none
+and falls back to the list, exactly as it is designed to.
+
+**The `code` this route never reads is a known gap, not an oversight.**
+`PublishService.connect_installation` verifies the installation id against GitHub with this
+deployment's own App credential before writing a row, which is what makes a hand-typed
+`?installation_id=` a `400` rather than a silent forgery. That proves the installation *exists*;
+it does not prove it belongs to the person the row is being recorded for. Exchanging the
+`code` GitHub appends for a user access token and confirming the installation appears in that
+user's own `GET /user/installations` is what would prove ownership — which is why the OAuth
+toggle stays on even though nothing here reads the `code` yet. Flagged as a follow-up, not
+implemented: exchanging that `code` needs its own ticket, not a line added to this one.
 
 **2. Generate a private key** at the bottom of the App's settings page. It downloads a `.pem`.
 
@@ -301,10 +337,11 @@ fly secrets set GITHUB_APP_PRIVATE_KEY="$(cat ~/Downloads/<your-app>.private-key
 Then set `NEXT_PUBLIC_GITHUB_APP_SLUG` to the same slug in Vercel, so the browser can build the
 install link.
 
-**What a user then does:** a site's **Schedule** tab → **Connect a GitHub repository** → grant
-repositories on GitHub → pick a repository, branch and path → turn on **Publish on every
-successful run**. A run whose `llms.txt` differs from what the repository has opens a pull
-request; a run that finds no change writes nothing and records `No change to publish`.
+**What a user then does:** a site's **Publish** tab → **Connect a GitHub repository** → grant
+repositories on GitHub → GitHub returns them to that site's **Publish** tab with a confirmation
+→ pick a repository, branch and path → turn on **Publish on every successful run**. A run whose
+`llms.txt` differs from what the repository has opens a pull request; a run that finds no change
+writes nothing and records `No change to publish`.
 
 **Nothing is stored but a pointer.** `github_installations` holds an installation id and an account
 name — no token, no key. Every write is authorized by a token minted from the App key when needed,

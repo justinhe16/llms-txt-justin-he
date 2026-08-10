@@ -12,7 +12,7 @@ import { Switch } from "@/components/ui/switch";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { Installation, Publication, PublishMode } from "@/lib/api/publish";
 import { ownerIdentity } from "@/lib/crawls/owner";
-import { publishStatusCopy } from "@/lib/crawls/publish-copy";
+import { publishStatusCopy, PUBLISH_NEXT_STEPS } from "@/lib/crawls/publish-copy";
 import { useDeletePublishTarget } from "@/lib/query/use-delete-publish-target";
 import { useDisconnectInstallation } from "@/lib/query/use-disconnect-installation";
 import { useInstallations } from "@/lib/query/use-installations";
@@ -27,12 +27,17 @@ import { RelativeTime } from "./relative-time";
 /**
  * Where this site's `llms.txt` gets published, and what happened last time.
  *
- * Lives in the Schedule tab beside `EnrichmentPanel`, for the reason that panel's docstring gives
- * at length: the Schedule tab is already the only place an owner changes anything about a website,
- * and a fifth tab would mean editing `DETAIL_TABS`, the URL vocabulary and `useDetailView`'s guard
- * for one form. It is also the right *conceptual* home — publishing is what a schedule is FOR,
- * and reading "run daily" directly above "open a pull request when it changes" is the whole
- * feature in two sentences.
+ * Has its own tab — `publish`, in `DETAIL_TABS` — unlike `EnrichmentPanel`, which stayed a card
+ * inside the Schedule tab (see that component's own docstring for the argument it makes for
+ * itself). The two look similar at a glance — both are per-website configuration a card renders
+ * beside the schedule controls — but they differ on the one axis that actually decides whether
+ * something earns a tab: `EnrichmentPanel` is one checkbox with an immediate, local effect;
+ * publishing is a multi-step configuration with an EXTERNAL round trip that has to be returned
+ * to. Connecting a GitHub account leaves this application entirely, and a URL that names the
+ * destination (`?tab=publish`) is what makes that return trip expressible at all —
+ * `app/api/github/callback/route.ts` can redirect to a specific website's Publish tab only
+ * because the tab exists as an addressable `?tab=` value in the first place. A checkbox with no
+ * round trip has nothing to return to, which is exactly why it did not move.
  *
  * ## Three states, and the first one is the interesting one
  *
@@ -49,10 +54,21 @@ import { RelativeTime } from "./relative-time";
  *
  * A GitHub App installation happens on github.com — the user chooses which repositories to grant,
  * which is precisely the decision this product must not make for them. So the button is an
- * `<a>` to `github.com/apps/{slug}/installations/new`, and the return trip lands on
- * `app/api/github/callback/route.ts`. `NEXT_PUBLIC_GITHUB_APP_SLUG` is the one piece of this
- * feature the browser needs, and it is safe to expose: an App slug is public by construction —
- * it is in the URL of the App's own listing page.
+ * `<a>` to `github.com/apps/{slug}/installations/new?state={websiteId}`, and the return trip
+ * lands on `app/api/github/callback/route.ts`. `NEXT_PUBLIC_GITHUB_APP_SLUG` is the one piece of
+ * this feature the browser needs, and it is safe to expose: an App slug is public by construction
+ * — it is in the URL of the App's own listing page.
+ *
+ * `state` is what closes the round trip this docstring's first paragraph argues for: GitHub
+ * echoes it back verbatim on the redirect, and the callback route hands it to
+ * `lib/crawls/github-callback.ts`'s `githubCallbackPath`, which sends the user back to THIS
+ * website's Publish tab rather than the flat `/crawls` list — but only after validating it as a
+ * UUID first, because `state` arrives on a browser redirect this application does not control
+ * the query string of, exactly as attacker-suppliable as `installation_id` already is (see that
+ * route's own header comment). `websiteId` is safe to put there in the first place for the same
+ * reason `installation_id` is safe to trust nothing from: nobody can do anything with a website
+ * id they could not already do by typing `/crawls/{id}` into the address bar, since reads are
+ * unscoped (ARCHITECTURE.md §4).
  */
 export function PublishPanel({
   websiteId,
@@ -90,9 +106,17 @@ export function PublishPanel({
       </div>
 
       {connected.length === 0 ? (
-        <ConnectPrompt disabledReason={disabledReason} />
+        <ConnectPrompt websiteId={websiteId} disabledReason={disabledReason} />
       ) : (
         <>
+          {/* State 2 only: connected, but nothing saved yet. Once a target exists the form
+              below already says what it does; this line exists for the visit — often the very
+              one that just came back from GitHub — where the form is empty and a person has to
+              be told there is a second step at all. Gated on `disabledReason` too: telling a
+              non-owner about two steps they cannot take is noise, not help. */}
+          {(target.data ?? null) === null && disabledReason === null && (
+            <p className="text-xs text-muted-foreground">{PUBLISH_NEXT_STEPS}</p>
+          )}
           <TargetForm
             websiteId={websiteId}
             installations={connected}
@@ -137,7 +161,13 @@ function PublishPanelSkeleton() {
  * The slug is read at render rather than at module scope so a deployment that has not set it
  * renders the "not configured" copy instead of a link to `github.com/apps/undefined`.
  */
-function ConnectPrompt({ disabledReason }: { disabledReason: string | null }) {
+function ConnectPrompt({
+  websiteId,
+  disabledReason,
+}: {
+  websiteId: string;
+  disabledReason: string | null;
+}) {
   const slug = process.env.NEXT_PUBLIC_GITHUB_APP_SLUG;
 
   if (slug === undefined || slug === "") {
@@ -156,19 +186,29 @@ function ConnectPrompt({ disabledReason }: { disabledReason: string | null }) {
     );
   }
 
+  // `state` is this website's own id, so GitHub's redirect back can name which site to return
+  // to — see this module's own docstring for the round trip it closes and the validation
+  // `githubCallbackPath` applies before trusting it. Built with `URLSearchParams`, not string
+  // concatenation, and the slug is escaped too: an App slug is operator-configured, not
+  // hardcoded, so nothing about this URL should assume it needs no escaping just because this
+  // deployment's own slug currently happens not to need any.
+  const installParams = new URLSearchParams({ state: websiteId });
+  const installUrl = `https://github.com/apps/${encodeURIComponent(slug)}/installations/new?${installParams.toString()}`;
+
   return (
     <div className="space-y-2">
       <Button asChild variant="outline" size="sm">
         {/* A plain anchor, not `next/link`: this leaves the app entirely, and GitHub returns the
             user through a fresh top-level navigation to our callback route. */}
-        <a href={`https://github.com/apps/${slug}/installations/new`}>
+        <a href={installUrl}>
           Connect a GitHub repository
           <ExternalLinkIcon aria-hidden />
         </a>
       </Button>
       <p className="text-xs text-muted-foreground">
         You choose which repositories to grant. You can revoke it any time from your GitHub
-        settings.
+        settings. GitHub will bring you back here when you&apos;re done — you&apos;ll still need
+        to pick a repository and turn on publishing before anything is written.
       </p>
     </div>
   );

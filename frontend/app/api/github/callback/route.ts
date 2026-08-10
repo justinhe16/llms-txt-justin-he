@@ -20,31 +20,27 @@
 //
 // The number is not a secret either, so there is nothing here to redact. An installation id
 // grants nothing without the App private key, which lives only on the Fly host.
+//
+// `state` arrives the same way and is trusted exactly as little. `PublishPanel`'s `ConnectPrompt`
+// puts a website's own id on the install link so this route can send the user back to that
+// site's Publish tab, but GitHub is only ever echoing back a value it read off a URL — anyone can
+// navigate here with `?state=anything`, and GitHub's own docs promise the echo only for an
+// install, an authenticate, or an accept-updates flow, saying nothing about `setup_action=request`
+// (the org-approval case below). This route does not attempt to validate `state` itself: it hands
+// the raw value to `lib/crawls/github-callback.ts`'s `githubCallbackPath`, which checks it against
+// a UUID shape before ever putting it in a redirect and falls back to the flat `/crawls` list for
+// anything else — absent, malformed, or actively hostile alike. A `state` this route trusted
+// unvalidated would be an open redirect; that module's own tests are what this route leans on
+// instead of re-deriving the same guarantee here.
 
 import { NextResponse, type NextRequest } from "next/server";
 
+import { githubCallbackPath, type GithubCallbackResult } from "@/lib/crawls/github-callback";
 import { createClient } from "@/lib/supabase/server";
-
-/** Where a user lands after this route finishes, in every outcome. */
-const LANDING_PATH = "/crawls";
 
 /** Bounds how long this handler waits on Fly, mirroring the `[...path]` proxy's own budget. A
  * wedged upstream becomes a redirect carrying `verify_failed` rather than a hung navigation. */
 const UPSTREAM_TIMEOUT_MS = 30_000;
-
-/**
- * Query-parameter values this route sets on `LANDING_PATH` so the page can toast the outcome.
- *
- * Fixed codes rather than a message, for the same reason `app/auth/callback/route.ts` maps its
- * own failures to a small vocabulary: `error_description` on an external redirect is untrusted
- * text and must never be rendered, so the page maps a code it recognizes to copy we wrote.
- */
-type CallbackResult =
-  | "connected"
-  | "cancelled"
-  | "missing_installation"
-  | "not_signed_in"
-  | "verify_failed";
 
 export async function GET(request: NextRequest): Promise<Response> {
   const { searchParams, origin } = request.nextUrl;
@@ -61,12 +57,20 @@ export async function GET(request: NextRequest): Promise<Response> {
         ? `https://${forwardedHost}`
         : origin;
 
+  const state = searchParams.get("state");
+
+  // Closes over `base` and `state` so every one of the five outcomes below is built the exact
+  // same way, through the exact same validation, and none of the six call sites below can pass
+  // the wrong `state` (or forget to pass it) — there is nowhere left for that mistake to happen.
+  const done = (result: GithubCallbackResult): Response =>
+    NextResponse.redirect(`${base}${githubCallbackPath(result, state)}`);
+
   // `setup_action=request` means the user asked an organization owner to approve the install
   // rather than completing one. There is no installation to record yet, and treating it as a
   // failure would be wrong — nothing went wrong, it is simply pending someone else.
   const setupAction = searchParams.get("setup_action");
   if (setupAction === "request") {
-    return done(base, "cancelled");
+    return done("cancelled");
   }
 
   const raw = searchParams.get("installation_id");
@@ -76,7 +80,7 @@ export async function GET(request: NextRequest): Promise<Response> {
   // past 2^53 cannot survive a round trip through a JavaScript number without silently
   // changing. Rejecting it here is better than sending a subtly different id to the API.
   if (raw === null || raw === "" || !Number.isSafeInteger(installationId) || installationId <= 0) {
-    return done(base, "missing_installation");
+    return done("missing_installation");
   }
 
   // The user must be signed in for the installation to belong to anybody. This is the same
@@ -88,7 +92,7 @@ export async function GET(request: NextRequest): Promise<Response> {
     data: { user },
   } = await supabase.auth.getUser();
   if (user === null) {
-    return done(base, "not_signed_in");
+    return done("not_signed_in");
   }
 
   // `API_URL` DIRECTLY, not through `lib/api/fetcher.ts` and not through the `[...path]` proxy.
@@ -101,7 +105,7 @@ export async function GET(request: NextRequest): Promise<Response> {
   const apiUrl = process.env.API_URL;
   if (apiUrl === undefined || apiUrl === "") {
     console.error("github callback: API_URL is not configured");
-    return done(base, "verify_failed");
+    return done("verify_failed");
   }
 
   try {
@@ -129,19 +133,14 @@ export async function GET(request: NextRequest): Promise<Response> {
       // Never log the response body: it is FastAPI's error detail, and a body is not the place to
       // assume nothing sensitive appears. The status is what distinguishes the cases.
       console.error("github callback: API refused the installation", response.status);
-      return done(base, "verify_failed");
+      return done("verify_failed");
     }
   } catch (error) {
     // A transport failure, or the timeout above. Logged rather than swallowed: Vercel's function
     // logs are the only record this will ever have.
     console.error("github callback: could not reach the API", error);
-    return done(base, "verify_failed");
+    return done("verify_failed");
   }
 
-  return done(base, "connected");
-}
-
-/** Redirect to the crawls page, carrying the outcome for it to toast. */
-function done(base: string, result: CallbackResult): Response {
-  return NextResponse.redirect(`${base}${LANDING_PATH}?github=${result}`);
+  return done("connected");
 }

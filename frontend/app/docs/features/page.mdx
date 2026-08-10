@@ -95,10 +95,13 @@ A schedule detects that a site changed. Publishing is what makes that useful: co
 repository, and every run whose `llms.txt` differs from what the repository already has opens a pull
 request with the new file.
 
-Open a site's **Schedule** tab and choose **Connect a GitHub repository**. That takes you to GitHub,
-where *you* choose which repositories to grant — this app never sees the others. Come back, pick a
-repository, a branch and a path (`llms.txt` at the root by default), then turn on **Publish on every
-successful run**. Connecting and authorizing writes are two separate switches on purpose.
+Open a site's **Publish** tab and choose **Connect a GitHub repository**. That takes you to GitHub,
+where *you* choose which repositories to grant — this app never sees the others. GitHub returns
+you to that same site's **Publish** tab and tells you whether it worked. If your organization
+requires an owner's approval, the install is *requested* rather than completed, and you come back
+to a note saying so rather than a confirmation. Once it's connected, pick a repository, a branch
+and a path (`llms.txt` at the root by default), then turn on **Publish on every successful run**.
+Connecting and authorizing writes are two separate switches on purpose.
 
 **Nothing is committed when nothing changed.** Every run is checked twice: against the previous
 run's index, and against the file the repository actually has. A daily schedule over a site that
@@ -139,9 +142,9 @@ unavailable** badge.
 
 ## Trends
 
-Trends is the last of four tabs on a website's page (`/crawls/{id}`). As of a recent rework
-it reports on the artifact — what `llms.txt` looks like, and what changed in it — rather than
-on the crawler's own timing.
+Trends is the last of five tabs on a website's page (`/crawls/{id}`) — Runs, Output, Schedule,
+Publish and Trends. As of a recent rework it reports on the artifact — what `llms.txt` looks
+like, and what changed in it — rather than on the crawler's own timing.
 
 Five tiles lead the panel: the newest run's page count, then four diffs against the previous
 completed run:

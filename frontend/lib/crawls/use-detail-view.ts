@@ -4,22 +4,8 @@ import { useCallback } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
 import type { StatsWindow } from "@/lib/api/runs";
-
-/**
- * The four tabs of `/crawls/[websiteId]`, in the order they are rendered.
- *
- * One of them — `schedule` — is a placeholder panel until PER-168 lands. It is listed here,
- * and rendered, rather than hidden: the shell is supposed to show the page's final shape,
- * and a tab that appears later moves everything sideways at the moment a user has just
- * learned where things are. Replacing a placeholder means swapping one component in
- * `components/crawls/website-detail.tsx` and deleting nothing from this file.
- */
-export const DETAIL_TABS = ["runs", "output", "schedule", "trends"] as const;
-
-export type DetailTab = (typeof DETAIL_TABS)[number];
-
-/** The tab a URL with no (or an unrecognized) `?tab=` resolves to. */
-export const DEFAULT_DETAIL_TAB: DetailTab = "runs";
+import { DEFAULT_DETAIL_TAB, isDetailTab, type DetailTab } from "@/lib/crawls/detail-tabs";
+import { GITHUB_RESULT_PARAM, isGithubCallbackResult } from "@/lib/crawls/github-callback";
 
 /**
  * The three windows the Trends tab offers, in the order the switcher renders them.
@@ -35,14 +21,6 @@ export const STATS_WINDOWS: readonly StatsWindow[] = ["1d", "7d", "14d"];
  * ticket's default: one day is too short to show a trend and fourteen is coarser than most
  * readers need for "how is this site's index doing lately". */
 export const DEFAULT_STATS_WINDOW: StatsWindow = "7d";
-
-// A `readonly [...]` tuple's `.includes` only accepts its own member type, so the argument
-// is widened to `string` for the check. The predicate signature is what narrows afterwards,
-// and it is doing real work: `?tab=` is user-supplied text, and `<Tabs value="../../etc">`
-// would otherwise put an arbitrary string into the tab state.
-function isDetailTab(value: string | null): value is DetailTab {
-  return value !== null && (DETAIL_TABS as readonly string[]).includes(value);
-}
 
 // The same guard for `?window=`, and it protects something more than tab state does: this
 // value is sent to the API as a query parameter and is baked into a React Query cache key.
@@ -65,7 +43,7 @@ function isStatsWindow(value: string | null): value is StatsWindow {
  * What the detail page is currently showing, and how to change it — both stored in the
  * query string so a view can be linked and survives a refresh.
  *
- * ## Three parameters, not one
+ * ## Four parameters, not one
  *
  * `?tab=` is the ticket's requirement. `?run=` is the Output tab's selected run, and it is
  * a URL parameter for the same reasons `?tab=` is, plus one the ticket forces: clicking a
@@ -77,8 +55,17 @@ function isStatsWindow(value: string | null): value is StatsWindow {
  * `?window=` is the Trends tab's time span, and it is here rather than in `useState` inside
  * that panel for exactly the same reason: `?tab=trends&window=14d` has to restore that view
  * on load. It lives in this hook rather than a second `useSearchParams` reader of its own so
- * that all three parameters are written through the one `updateView` below — two independent
+ * that every parameter is written through the one `updateView` below — two independent
  * writers racing on the same query string is how one of them loses a parameter.
+ *
+ * `?github=` is the fourth, and it reads differently from the other three: nothing in the
+ * browser ever WRITES it — only `app/api/github/callback/route.ts` does, by redirecting here
+ * after a round trip to GitHub — so this hook only reads it and clears it, and `updateView`'s
+ * `githubResult` field is typed `null` and nothing else to encode that a call site can erase
+ * the parameter but can never invent one. It still has to go through this one writer rather
+ * than a `useSearchParams` of its own, for the same "two writers, one loses" reason `?window=`
+ * does: `GithubConnectToast`'s clear has to preserve `?tab=publish` (and `?run=`, and
+ * `?window=`) exactly the way every other `updateView` call does.
  *
  * `?run=` is deliberately not validated here beyond being a string. A run id is a UUID the
  * server owns; a made-up one produces a `404` from `GET /runs/{id}` that the Output tab
@@ -86,7 +73,10 @@ function isStatsWindow(value: string | null): value is StatsWindow {
  * parameter and showing a different run than the URL asked for. `?window=` is the opposite
  * case and IS validated (`isStatsWindow` above): its three values are a closed set this app
  * owns, not a server-side identifier, so an unrecognized one has an obviously correct
- * fallback where a made-up run id does not.
+ * fallback where a made-up run id does not. `?github=` is validated the same way `?window=`
+ * is (`isGithubCallbackResult`), for the same reason: it is a closed set this app owns, and an
+ * unrecognized value is left in the URL rather than rewritten — the same restraint `?run=`
+ * shows about not silently discarding something a person (or a bookmark) put there.
  *
  * ## `replace`, never `push`
  *
@@ -114,14 +104,26 @@ export function useDetailView() {
   // `window.matchMedia` in the same component into a runtime crash.
   const statsWindow: StatsWindow = isStatsWindow(rawWindow) ? rawWindow : DEFAULT_STATS_WINDOW;
 
-  // One writer for all three parameters, so a change to any of them is a single `replace` —
+  const rawGithubResult = searchParams.get(GITHUB_RESULT_PARAM);
+  // `null` for both "absent" and "present but not one of ours" — see the docstring's `?github=`
+  // paragraph for why an unrecognized value is left in the URL rather than corrected.
+  const githubResult = isGithubCallbackResult(rawGithubResult) ? rawGithubResult : null;
+
+  // One writer for all four parameters, so a change to any of them is a single `replace` —
   // the row click sets two at once, and two sequential navigations would briefly render the
   // Output tab with the *previous* run selected before correcting itself.
   //
   // `undefined` means "leave this parameter as it is" and `null` means "remove it", which
-  // is what lets `setTab` below change tabs without disturbing the selected run.
+  // is what lets `setTab` below change tabs without disturbing the selected run. `githubResult`
+  // only ever appears here as `null` — see the docstring — so `undefined` (leave as is) is the
+  // only other value `tsc` allows a caller to pass.
   const updateView = useCallback(
-    (next: { tab?: DetailTab; runId?: string | null; statsWindow?: StatsWindow }) => {
+    (next: {
+      tab?: DetailTab;
+      runId?: string | null;
+      statsWindow?: StatsWindow;
+      githubResult?: null;
+    }) => {
       const params = new URLSearchParams(searchParams.toString());
 
       if (next.tab !== undefined) params.set("tab", next.tab);
@@ -130,6 +132,7 @@ export function useDetailView() {
         else params.set("run", next.runId);
       }
       if (next.statsWindow !== undefined) params.set("window", next.statsWindow);
+      if (next.githubResult === null) params.delete(GITHUB_RESULT_PARAM);
 
       const query = params.toString();
       router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false });
@@ -159,5 +162,18 @@ export function useDetailView() {
     [updateView]
   );
 
-  return { tab, selectedRunId, statsWindow, setTab, showRunOutput, setStatsWindow };
+  /** Remove `?github=` once `GithubConnectToast` has shown it. Read-and-clear only — see the
+   * docstring's `?github=` paragraph for why there is no way to set this from the browser. */
+  const clearGithubResult = useCallback(() => updateView({ githubResult: null }), [updateView]);
+
+  return {
+    tab,
+    selectedRunId,
+    statsWindow,
+    githubResult,
+    setTab,
+    showRunOutput,
+    setStatsWindow,
+    clearGithubResult,
+  };
 }
