@@ -89,6 +89,37 @@ crawling in the same second forever.
 
 A schedule can be switched off without being deleted.
 
+## Publishing
+
+A schedule detects that a site changed. Publishing is what makes that useful: connect a GitHub
+repository, and every run whose `llms.txt` differs from what the repository already has opens a pull
+request with the new file.
+
+Open a site's **Schedule** tab and choose **Connect a GitHub repository**. That takes you to GitHub,
+where *you* choose which repositories to grant — this app never sees the others. Come back, pick a
+repository, a branch and a path (`llms.txt` at the root by default), then turn on **Publish on every
+successful run**. Connecting and authorizing writes are two separate switches on purpose.
+
+**Nothing is committed when nothing changed.** Every run is checked twice: against the previous
+run's index, and against the file the repository actually has. A daily schedule over a site that
+hasn't changed produces no commits and a row reading **No change to publish** — which is what a
+working setup looks like, not a broken one. The two checks disagree when someone edits the file by
+hand, or when you point the site at a different repository, which is why both exist.
+
+**Pull request or direct commit.** A pull request is the default and the recommendation: generated
+content arriving unreviewed on your main branch is a surprise, and the pull request body carries what
+changed ("4 pages added, 2 titles changed"). Choose **Commit directly** if you would rather the file
+just stay current.
+
+**We store no credential.** Connecting records which installation you granted and nothing else — no
+token, no key. Each write is authorized by a short-lived token minted at the moment it is needed and
+never written down. Revoke it whenever you like from your own GitHub settings; it takes effect
+immediately, and this app has nothing to clean up.
+
+Recent publications are listed under the form, newest first, each linking to the pull request it
+opened. A failure — a protected branch, revoked access — is shown with GitHub's own reason and never
+affects the run: the `llms.txt` is already generated and downloadable regardless.
+
 ## Summarization
 
 llms-text can ask Claude to write each page's title and description, in place of what

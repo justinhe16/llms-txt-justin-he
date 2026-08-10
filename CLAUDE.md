@@ -88,6 +88,23 @@ is already taken (ARCHITECTURE.md §3.4).
 Build against those signatures, and do not widen them without a ticket that redesigns the
 seam. Do not scatter crawling, parsing, or LLM-calling logic through the services.
 
+**10. Publishing to GitHub may never fail a run, and never stores a credential.** Two
+rules, both cheap to break and expensive to discover.
+
+*A publication is a delivery step, not part of the run.* By the time it happens the artifact
+is generated, uploaded and committed to `runs.llms_txt` — so the call lives in
+`app/worker/jobs.py`'s `crawl_task` **after** `CrawlService.execute_run` returns, never inside
+it, and `PublishService.publish_run` never raises. It records a `failed` publication row
+instead. Do not move that call into the crawl service, do not let it raise, and do not make a
+publication failure change a run's status: that would replace a user's good `llms.txt` with no
+`llms.txt` at all.
+
+*No token, refresh token, or key is ever written to the database.* `github_installations`
+stores an installation id and an account name. An installation access token is minted from
+`GITHUB_APP_PRIVATE_KEY` on demand, held in memory, and left to expire — never persisted,
+never logged, never put in a URL (`Authorization` header only). If you find yourself adding a
+`token` column, the design has gone wrong; ARCHITECTURE.md §3.9 is the argument.
+
 **`site_url` was that redesign, and it is the only parameter either function gets that is
 not a fetched page.** The seam originally took `pages` alone and derived the origin it was
 describing from them — `min(page.url for page in pages)`, the alphabetically first URL the
@@ -113,6 +130,7 @@ backend/app/features/<name>/    schemas.py, service.py, internals/{<name>_reader
 backend/app/infrastructure/db/  asyncpg pool factory, base Reader/Writer, transaction()
 backend/app/infrastructure/queue/  ARQ Redis pool factory; the only place TLS is decided
 backend/app/infrastructure/storage/  Supabase Storage client; no singleton (ARCHITECTURE.md §3.7)
+backend/app/features/publish/   GitHub App credentials, publish targets, publications (ARCHITECTURE.md §3.9)
 backend/app/worker/             settings.py (WorkerSettings) + jobs.py — thin, call services
 db/schema.prisma                the schema, and the only source of truth for it
 db/migrations/                  reviewed, committed SQL

@@ -103,6 +103,35 @@ const stats = {
     ["stats", "detail", websiteId, window] as const,
 };
 
+// Publishing. Three resources with three different scopes, which is why this is not one key
+// factory with a `websiteId` argument:
+//
+//   * `installations` is per-USER and per-nothing-else. It is the only key here not scoped to a
+//     website, because an installation is a fact about someone's GitHub account (see
+//     lib/api/publish.ts). One key for the whole list.
+//   * `repositories` hangs off an installation, not a website, and is a live proxy to GitHub
+//     rather than our own data — so it is nested under `installations` to be invalidated with
+//     them when one is disconnected.
+//   * `targets` and `publications` are per-website, like `schedules` above.
+//
+// `targets` and `publications` are separate roots rather than one "publish" root with two
+// children, for the reason `stats` states next door: writing a target invalidates the target and
+// the website list, but must NOT drop a publication history that certainly did not change.
+const installations = {
+  all: ["installations"] as const,
+  list: ["installations", "list"] as const,
+  repositories: (installationRowId: string) =>
+    ["installations", "repositories", installationRowId] as const,
+};
+
+const publishTargets = {
+  detail: (websiteId: string) => ["publish-targets", "detail", websiteId] as const,
+};
+
+const publications = {
+  list: (websiteId: string) => ["publications", "list", websiteId] as const,
+};
+
 const health = {
   status: ["health"] as const,
 };
@@ -112,5 +141,8 @@ export const queryKeys = {
   runs,
   schedules,
   stats,
+  installations,
+  publishTargets,
+  publications,
   health,
 };

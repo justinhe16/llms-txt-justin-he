@@ -891,6 +891,65 @@ call site that does is still a bug — one the filter may not recognise.
 
 ---
 
+### 3.9 The publish feature
+
+`backend/app/features/publish/` delivers a generated `llms.txt` into a GitHub repository, and it is
+the first feature module here that **owns tables of its own** — `github_installations`,
+`publish_targets`, `publications`. The crawl feature owns none and writes through `runs`; this one
+has state because "where does this site publish, and what happened last time" outlives any run.
+
+**It stores no credential, and that is the reason it is a GitHub App.** The installation row holds
+GitHub's installation id and an account name. Every repository write is authorized by an
+installation access token minted from this deployment's App private key at the moment it is needed,
+cached in process memory for `github_token_ttl_s`, and left to expire. Three consequences worth
+stating:
+
+- A **scheduled** publish runs in the WORKER, hours after the browser closed. There is no session
+  and no `provider_token` there — Supabase returns one only on the initial OAuth exchange and does
+  not persist it — so any design authorizing a repo write with a browser-obtained token cannot do
+  the one thing this feature exists for.
+- A database dump grants nobody write access to anybody's repository. A stored PAT would.
+- Revocation is the user's and is immediate: uninstalling the App in GitHub's own UI stops every
+  future token, with nothing for this codebase to notice or clean up.
+
+**Two tokens, accepted on disjoint endpoints.** `internals/github_app.py` mints the *App JWT*
+(RS256, signed locally, authenticates the App, accepted only by `/app/...` and the token exchange)
+and exchanges it for the *installation token* (authenticates an installation; the one every write
+uses). `InstallationToken` is a distinct type from `str` precisely so the two cannot be swapped, and
+`internals/github_client.py` takes a token and can never mint one.
+
+**A publish failure cannot fail a crawl, structurally rather than by discipline.** The call site is
+`app/worker/jobs.py`'s `crawl_task`, **after** `CrawlService.execute_run` has returned — so the
+artifact is already generated, uploaded and committed to `runs.llms_txt`, and there is no run in
+flight for a failure to affect. `CrawlService` therefore gains no collaborator: two features
+orchestrated by a job function is what §3.1 already permits, and neither feature imports the other's
+`internals/`. `PublishService.publish_run` additionally never raises — it records a `failed`
+publication row — and deliberately does not catch `asyncio.CancelledError`, so a cancelled worker
+job stays cancelled.
+
+**Nothing is committed when nothing changed, decided twice.** `internals/change_summary.py` reads
+the run's own `index_diff` first (pure, no network); `_publish_to_github` then compares the
+repository's actual file contents. Both exist because they disagree in real cases — somebody
+hand-edited `llms.txt`, or the target was just repointed at a fresh repository. The bias is stated
+once in that module: **when in doubt, publish**, because a false "changed" costs a
+`skipped_unchanged` row while a false "unchanged" silently stops publishing and nobody finds out.
+
+`skipped_unchanged` rows are written rather than passed over in silence, because the absence of a row
+cannot distinguish "we looked and nothing had changed" from "the schedule never ran."
+
+**`schedules.auto_publish` stays reserved and unused**, and this feature is what decided not to use
+it. A publish flag with no target is meaningless, so `publish_targets.active` is the flag — one that
+cannot disagree with the configuration it gates. The reserved column keeps its `schema.prisma`
+warning: do not build against it.
+
+**One read in this codebase filters by `user_id`, and it is here.** §4.1's unscoped-read rule exists
+for facts about crawled sites; an installation is a fact about a person's GitHub account, and telling
+a caller "that installation exists but is not yours" would leak which accounts other users have
+connected. `publish_targets` and `publications` are read unscoped like everything else, because they
+describe a website. See `internals/publish_reader.py`'s own docstring.
+
+---
+
 ## 4. The authorization contract — public read, owner write
 
 **This project is not multi-tenant.** There is one flat pool of websites and runs, and every

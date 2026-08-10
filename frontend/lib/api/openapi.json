@@ -103,6 +103,39 @@
         "title": "IndexPageRef",
         "type": "object"
       },
+      "InstallationResponse": {
+        "description": "One GitHub App installation this user has connected.",
+        "properties": {
+          "account_login": {
+            "description": "The GitHub account or organization it was installed on.",
+            "title": "Account Login",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "installation_id": {
+            "description": "GitHub's own installation id. Not a secret — it grants nothing without this deployment's App private key.",
+            "title": "Installation Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "installation_id",
+          "account_login",
+          "created_at"
+        ],
+        "title": "InstallationResponse",
+        "type": "object"
+      },
       "LatestRunSnapshot": {
         "description": "The newest completed run inside the requested `window`, and what changed in its index\n— the Output tab's \"what changed in the latest run\" panel reads this, not `series`, which\nis why it is not itself a `RunStatsPoint`.\n\n**Window-scoped, like `RunStatsTotals.last_run_at`.** A completed run older than the\nwindow does not surface here even if it is the website's most recent run overall — the\nsame rule `last_run_at` already follows, stated explicitly here because a client reading\nonly this field (and not also checking the window) could otherwise mistake \"no completed\nrun in the last 24 hours\" for \"this website has never completed a run.\"",
         "properties": {
@@ -270,6 +303,272 @@
           "items"
         ],
         "title": "Page[RunListItemResponse]",
+        "type": "object"
+      },
+      "PublicationResponse": {
+        "description": "One publication attempt.\n\n`status` is the field worth reading first: `skipped_unchanged` is a success in the sense that\nmatters — the system looked, the index was identical, and nothing needed doing. A history of\nthose is a working schedule over a stable site, not a broken one.",
+        "properties": {
+          "commit_sha": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Commit Sha"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "pr_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pr Number"
+          },
+          "pr_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pr Url"
+          },
+          "run_id": {
+            "format": "uuid",
+            "title": "Run Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "skipped_unchanged",
+              "succeeded",
+              "failed"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "run_id",
+          "status",
+          "commit_sha",
+          "pr_url",
+          "pr_number",
+          "error",
+          "created_at"
+        ],
+        "title": "PublicationResponse",
+        "type": "object"
+      },
+      "PublishTargetRequest": {
+        "description": "`PUT /websites/{id}/publish-target` — where this site's `llms.txt` should go.",
+        "properties": {
+          "active": {
+            "default": false,
+            "description": "Whether successful runs publish to this target. Off by default: connecting a repository and authorizing writes to it are two separate decisions.",
+            "title": "Active",
+            "type": "boolean"
+          },
+          "base_branch": {
+            "maxLength": 255,
+            "minLength": 1,
+            "pattern": "^[^\\s~^:?*\\[\\\\]+$",
+            "title": "Base Branch",
+            "type": "string"
+          },
+          "installation_id": {
+            "description": "The `id` of one of this user's own `GET /github/installations` rows — this API's uuid, not GitHub's numeric installation id.",
+            "format": "uuid",
+            "title": "Installation Id",
+            "type": "string"
+          },
+          "mode": {
+            "default": "pull_request",
+            "enum": [
+              "pull_request",
+              "commit"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "path": {
+            "default": "llms.txt",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Path",
+            "type": "string"
+          },
+          "repo_name": {
+            "maxLength": 100,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+            "title": "Repo Name",
+            "type": "string"
+          },
+          "repo_owner": {
+            "maxLength": 100,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+            "title": "Repo Owner",
+            "type": "string"
+          }
+        },
+        "required": [
+          "installation_id",
+          "repo_owner",
+          "repo_name",
+          "base_branch"
+        ],
+        "title": "PublishTargetRequest",
+        "type": "object"
+      },
+      "PublishTargetResponse": {
+        "description": "A website's publish target, as the API returns it.",
+        "properties": {
+          "account_login": {
+            "description": "Denormalized from the installation, so a client rendering the target does not need a second request to name the account it publishes as.",
+            "title": "Account Login",
+            "type": "string"
+          },
+          "active": {
+            "title": "Active",
+            "type": "boolean"
+          },
+          "base_branch": {
+            "title": "Base Branch",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "installation_id": {
+            "format": "uuid",
+            "title": "Installation Id",
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "pull_request",
+              "commit"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "repo_name": {
+            "title": "Repo Name",
+            "type": "string"
+          },
+          "repo_owner": {
+            "title": "Repo Owner",
+            "type": "string"
+          },
+          "website_id": {
+            "format": "uuid",
+            "title": "Website Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "website_id",
+          "installation_id",
+          "account_login",
+          "repo_owner",
+          "repo_name",
+          "base_branch",
+          "path",
+          "mode",
+          "active"
+        ],
+        "title": "PublishTargetResponse",
+        "type": "object"
+      },
+      "RepositoryListResponse": {
+        "description": "`GET /github/installations/{id}/repositories`.",
+        "properties": {
+          "repositories": {
+            "items": {
+              "$ref": "#/components/schemas/RepositoryResponse"
+            },
+            "title": "Repositories",
+            "type": "array"
+          },
+          "truncated": {
+            "description": "Whether the installation has more repositories than this list carries (`MAX_REPOSITORIES`). True means enter the repository by name rather than pick it.",
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "repositories",
+          "truncated"
+        ],
+        "title": "RepositoryListResponse",
+        "type": "object"
+      },
+      "RepositoryResponse": {
+        "description": "One repository an installation can write to, for the target picker.",
+        "properties": {
+          "default_branch": {
+            "title": "Default Branch",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "owner": {
+            "title": "Owner",
+            "type": "string"
+          },
+          "private": {
+            "title": "Private",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "owner",
+          "name",
+          "default_branch",
+          "private"
+        ],
+        "title": "RepositoryResponse",
         "type": "object"
       },
       "RunAlreadyInFlightDetail": {
@@ -1344,6 +1643,174 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/github/installations": {
+      "get": {
+        "description": "Every GitHub App installation the caller has connected.\n\nPer-user, unlike every other read in this API. An installation is a fact about someone's\nGitHub account rather than about a crawled site, which is the distinction\n`internals/publish_reader.py`'s docstring draws against §4.1.",
+        "operationId": "list_installations_github_installations_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/InstallationResponse"
+                  },
+                  "title": "Response List Installations Github Installations Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Installations",
+        "tags": [
+          "publish"
+        ]
+      },
+      "post": {
+        "description": "Record an installation the caller was redirected back from.\n\n`installation_id` is GitHub's own numeric id, arriving from the setup callback's query string.\nThe service verifies it against GitHub before writing anything — see\n`PublishService.connect_installation`, because a number on a redirect is not a fact.\n\nAlways `201`, including when the row already existed and was refreshed. Distinguishing the two\nwould need a branch in this handler, which is what CLAUDE.md #6 forbids; the same reasoning\n`upsert_schedule` gives for always returning `200`.",
+        "operationId": "connect_installation_github_installations_post",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "installation_id",
+            "required": true,
+            "schema": {
+              "title": "Installation Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstallationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Connect Installation",
+        "tags": [
+          "publish"
+        ]
+      }
+    },
+    "/github/installations/{id}": {
+      "delete": {
+        "description": "Forget an installation and every publish target that used it.\n\nDoes not uninstall the App on GitHub — that is the user's own action to take in their account,\nand `PublishService.disconnect_installation` explains why this API does not attempt it.",
+        "operationId": "disconnect_installation_github_installations__id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Disconnect Installation",
+        "tags": [
+          "publish"
+        ]
+      }
+    },
+    "/github/installations/{id}/repositories": {
+      "get": {
+        "description": "The repositories an installation may write to, for the target picker.\n\nProxied live from GitHub rather than stored: the set changes whenever the user edits the\ninstallation's repository access, and a cached copy would offer a repository we can no longer\nwrite to. `502` when GitHub cannot be reached — the request was fine, the upstream was not.",
+        "operationId": "list_installation_repositories_github_installations__id__repositories_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepositoryListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Installation Repositories",
+        "tags": [
+          "publish"
+        ]
+      }
+    },
     "/health": {
       "get": {
         "description": "Liveness-and-readiness probe, polled by Fly every 10 seconds.\n\n**The HTTP status is always 200 as long as this process is alive — dependency health is\nreported in the body, never the status code.** This is deliberate: restarting a healthy\nweb machine does nothing to fix a Postgres or an Upstash outage, it just adds a flapping\nfleet of machines on top of one. A non-200 here would make Fly do exactly that. The\n`[[http_service.checks]]` block in backend/fly.toml is scoped to the `app` process for\na related reason — the worker serves no HTTP, so a check against it could only ever\nfail.\n\nBoth checks always run, so `db` and `redis` are always present: `\"ok\"` when the probe\nsucceeds, `\"timeout\"` if it exceeds its budget, `\"error\"` for anything else. They run\n**concurrently**, so one slow dependency does not spend the other's budget and the\nendpoint stays inside `_CHECK_TIMEOUT_SECONDS` overall.\n\n`status` is `\"ok\"` only when both are `\"ok\"`; otherwise it's `\"degraded\"`, so a caller\nthat reads only `status` still gets an accurate signal without having to know the\ncomponent values. A degraded queue is a real degradation — the API can still serve every\nread, but it cannot start a crawl — and saying so here is free, precisely because\nnothing restarts a machine over this body. What \"non-fatal\" buys is the 200, not a\nflattering summary.\n\n**Redis is probed on every call, which is not free.** Fly polls this every 10s, so the\ncheck alone costs 6 × 60 × 24 = 8,640 Redis commands a day. That is real, but it is not\nwhere the money is — an idle worker at `poll_delay = 5` spends twice that (see\n`app.worker.settings` for the arithmetic). If it ever needs to come down, cache the\nprobe result for a few seconds here rather than slowing the Fly check, which is also\nthe failure detector.",
@@ -1803,6 +2270,213 @@
         "summary": "Update Website",
         "tags": [
           "websites"
+        ]
+      }
+    },
+    "/websites/{id}/publications": {
+      "get": {
+        "description": "A website's publication history, newest first, capped at `MAX_PUBLICATIONS_PAGE`.\n\nNot paginated, and not `Page[...]`: this is a panel on a website's page whose list is almost\nalways length zero or one. See `MAX_PUBLICATIONS_PAGE` for the argument.",
+        "operationId": "list_publications_websites__id__publications_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/PublicationResponse"
+                  },
+                  "title": "Response List Publications Websites  Id  Publications Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Publications",
+        "tags": [
+          "publish"
+        ]
+      }
+    },
+    "/websites/{id}/publish-target": {
+      "delete": {
+        "description": "Stop publishing a website the caller owns. Idempotent — `204` even if there was none.",
+        "operationId": "delete_publish_target_websites__id__publish_target_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Delete Publish Target",
+        "tags": [
+          "publish"
+        ]
+      },
+      "get": {
+        "description": "Return where a website publishes, or `null`.\n\n`200` with a `null` body when the website has no target — a normal state, not an error, exactly\nas `get_schedule` treats a website with no schedule.",
+        "operationId": "get_publish_target_websites__id__publish_target_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/PublishTargetResponse"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "title": "Response Get Publish Target Websites  Id  Publish Target Get"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Publish Target",
+        "tags": [
+          "publish"
+        ]
+      },
+      "put": {
+        "description": "Create or replace where a website the caller owns publishes.\n\n`403` when the caller is not the owner, `404` when `installation_id` names no installation of\ntheirs — the second is a `404` rather than a `403` because telling a caller that an\ninstallation exists but belongs to someone else would leak which GitHub accounts other users\nhave connected.",
+        "operationId": "upsert_publish_target_websites__id__publish_target_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PublishTargetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublishTargetResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Upsert Publish Target",
+        "tags": [
+          "publish"
         ]
       }
     },

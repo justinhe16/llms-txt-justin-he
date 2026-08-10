@@ -4,6 +4,89 @@
  */
 
 export interface paths {
+    "/github/installations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Installations
+         * @description Every GitHub App installation the caller has connected.
+         *
+         *     Per-user, unlike every other read in this API. An installation is a fact about someone's
+         *     GitHub account rather than about a crawled site, which is the distinction
+         *     `internals/publish_reader.py`'s docstring draws against §4.1.
+         */
+        get: operations["list_installations_github_installations_get"];
+        put?: never;
+        /**
+         * Connect Installation
+         * @description Record an installation the caller was redirected back from.
+         *
+         *     `installation_id` is GitHub's own numeric id, arriving from the setup callback's query string.
+         *     The service verifies it against GitHub before writing anything — see
+         *     `PublishService.connect_installation`, because a number on a redirect is not a fact.
+         *
+         *     Always `201`, including when the row already existed and was refreshed. Distinguishing the two
+         *     would need a branch in this handler, which is what CLAUDE.md #6 forbids; the same reasoning
+         *     `upsert_schedule` gives for always returning `200`.
+         */
+        post: operations["connect_installation_github_installations_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/github/installations/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Disconnect Installation
+         * @description Forget an installation and every publish target that used it.
+         *
+         *     Does not uninstall the App on GitHub — that is the user's own action to take in their account,
+         *     and `PublishService.disconnect_installation` explains why this API does not attempt it.
+         */
+        delete: operations["disconnect_installation_github_installations__id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/github/installations/{id}/repositories": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Installation Repositories
+         * @description The repositories an installation may write to, for the target picker.
+         *
+         *     Proxied live from GitHub rather than stored: the set changes whenever the user edits the
+         *     installation's repository access, and a cached copy would offer a repository we can no longer
+         *     write to. `502` when GitHub cannot be reached — the request was fine, the upstream was not.
+         */
+        get: operations["list_installation_repositories_github_installations__id__repositories_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/health": {
         parameters: {
             query?: never;
@@ -200,6 +283,65 @@ export interface paths {
         patch: operations["update_website_websites__id__patch"];
         trace?: never;
     };
+    "/websites/{id}/publications": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Publications
+         * @description A website's publication history, newest first, capped at `MAX_PUBLICATIONS_PAGE`.
+         *
+         *     Not paginated, and not `Page[...]`: this is a panel on a website's page whose list is almost
+         *     always length zero or one. See `MAX_PUBLICATIONS_PAGE` for the argument.
+         */
+        get: operations["list_publications_websites__id__publications_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/websites/{id}/publish-target": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Publish Target
+         * @description Return where a website publishes, or `null`.
+         *
+         *     `200` with a `null` body when the website has no target — a normal state, not an error, exactly
+         *     as `get_schedule` treats a website with no schedule.
+         */
+        get: operations["get_publish_target_websites__id__publish_target_get"];
+        /**
+         * Upsert Publish Target
+         * @description Create or replace where a website the caller owns publishes.
+         *
+         *     `403` when the caller is not the owner, `404` when `installation_id` names no installation of
+         *     theirs — the second is a `404` rather than a `403` because telling a caller that an
+         *     installation exists but belongs to someone else would leak which GitHub accounts other users
+         *     have connected.
+         */
+        put: operations["upsert_publish_target_websites__id__publish_target_put"];
+        post?: never;
+        /**
+         * Delete Publish Target
+         * @description Stop publishing a website the caller owns. Idempotent — `204` even if there was none.
+         */
+        delete: operations["delete_publish_target_websites__id__publish_target_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/websites/{id}/runs": {
         parameters: {
             query?: never;
@@ -394,6 +536,32 @@ export interface components {
             url: string;
         };
         /**
+         * InstallationResponse
+         * @description One GitHub App installation this user has connected.
+         */
+        InstallationResponse: {
+            /**
+             * Account Login
+             * @description The GitHub account or organization it was installed on.
+             */
+            account_login: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /**
+             * Installation Id
+             * @description GitHub's own installation id. Not a secret — it grants nothing without this deployment's App private key.
+             */
+            installation_id: number;
+        };
+        /**
          * LatestRunSnapshot
          * @description The newest completed run inside the requested `window`, and what changed in its index
          *     — the Output tab's "what changed in the latest run" panel reads this, not `series`, which
@@ -461,6 +629,147 @@ export interface components {
             items: components["schemas"]["RunListItemResponse"][];
             /** Next Cursor */
             next_cursor?: string | null;
+        };
+        /**
+         * PublicationResponse
+         * @description One publication attempt.
+         *
+         *     `status` is the field worth reading first: `skipped_unchanged` is a success in the sense that
+         *     matters — the system looked, the index was identical, and nothing needed doing. A history of
+         *     those is a working schedule over a stable site, not a broken one.
+         */
+        PublicationResponse: {
+            /** Commit Sha */
+            commit_sha: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Error */
+            error: string | null;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Pr Number */
+            pr_number: number | null;
+            /** Pr Url */
+            pr_url: string | null;
+            /**
+             * Run Id
+             * Format: uuid
+             */
+            run_id: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "skipped_unchanged" | "succeeded" | "failed";
+        };
+        /**
+         * PublishTargetRequest
+         * @description `PUT /websites/{id}/publish-target` — where this site's `llms.txt` should go.
+         */
+        PublishTargetRequest: {
+            /**
+             * Active
+             * @description Whether successful runs publish to this target. Off by default: connecting a repository and authorizing writes to it are two separate decisions.
+             * @default false
+             */
+            active: boolean;
+            /** Base Branch */
+            base_branch: string;
+            /**
+             * Installation Id
+             * Format: uuid
+             * @description The `id` of one of this user's own `GET /github/installations` rows — this API's uuid, not GitHub's numeric installation id.
+             */
+            installation_id: string;
+            /**
+             * Mode
+             * @default pull_request
+             * @enum {string}
+             */
+            mode: "pull_request" | "commit";
+            /**
+             * Path
+             * @default llms.txt
+             */
+            path: string;
+            /** Repo Name */
+            repo_name: string;
+            /** Repo Owner */
+            repo_owner: string;
+        };
+        /**
+         * PublishTargetResponse
+         * @description A website's publish target, as the API returns it.
+         */
+        PublishTargetResponse: {
+            /**
+             * Account Login
+             * @description Denormalized from the installation, so a client rendering the target does not need a second request to name the account it publishes as.
+             */
+            account_login: string;
+            /** Active */
+            active: boolean;
+            /** Base Branch */
+            base_branch: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /**
+             * Installation Id
+             * Format: uuid
+             */
+            installation_id: string;
+            /**
+             * Mode
+             * @enum {string}
+             */
+            mode: "pull_request" | "commit";
+            /** Path */
+            path: string;
+            /** Repo Name */
+            repo_name: string;
+            /** Repo Owner */
+            repo_owner: string;
+            /**
+             * Website Id
+             * Format: uuid
+             */
+            website_id: string;
+        };
+        /**
+         * RepositoryListResponse
+         * @description `GET /github/installations/{id}/repositories`.
+         */
+        RepositoryListResponse: {
+            /** Repositories */
+            repositories: components["schemas"]["RepositoryResponse"][];
+            /**
+             * Truncated
+             * @description Whether the installation has more repositories than this list carries (`MAX_REPOSITORIES`). True means enter the repository by name rather than pick it.
+             */
+            truncated: boolean;
+        };
+        /**
+         * RepositoryResponse
+         * @description One repository an installation can write to, for the target picker.
+         */
+        RepositoryResponse: {
+            /** Default Branch */
+            default_branch: string;
+            /** Name */
+            name: string;
+            /** Owner */
+            owner: string;
+            /** Private */
+            private: boolean;
         };
         /**
          * RunAlreadyInFlightDetail
@@ -1053,6 +1362,117 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    list_installations_github_installations_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InstallationResponse"][];
+                };
+            };
+        };
+    };
+    connect_installation_github_installations_post: {
+        parameters: {
+            query: {
+                installation_id: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InstallationResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    disconnect_installation_github_installations__id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_installation_repositories_github_installations__id__repositories_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RepositoryListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     health_health_get: {
         parameters: {
             query?: never;
@@ -1345,6 +1765,132 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["WebsiteResponse"];
                 };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_publications_websites__id__publications_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PublicationResponse"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_publish_target_websites__id__publish_target_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PublishTargetResponse"] | null;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    upsert_publish_target_websites__id__publish_target_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PublishTargetRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PublishTargetResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_publish_target_websites__id__publish_target_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {

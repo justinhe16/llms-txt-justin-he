@@ -93,6 +93,12 @@ model Website {
   schedule Schedule?
   runs     Run[]
 
+  /// Where this site's `llms.txt` gets published, if its owner has connected a repo. At most
+  /// one, exactly like `schedule` above and for the same reason: a site has one canonical
+  /// destination for its artifact, and "which of your three repos is the real one?" is not a
+  /// question this product should be able to ask.
+  publishTarget PublishTarget?
+
   /// One user cannot add the same site twice; two users each adding it is fine. This
   /// project is not multi-tenant (ARCHITECTURE.md §4) — the pair is a dedupe key, not a
   /// tenancy boundary.
@@ -249,9 +255,136 @@ model Run {
   // trigger and the stuck-run reaper — look for exactly these two statuses, while the
   // rows that accumulate forever are the completed and failed ones.
 
+  /// Every attempt to publish this run's artifact — usually zero or one, and more only when a
+  /// target was reconfigured and the run republished.
+  publications Publication[]
+
   /// History queries and the latest-run lookup, which both read newest-first.
   @@index([websiteId, startedAt(sort: Desc)])
   @@map("runs")
+}
+
+/// A GitHub App installation a user has authorized, and the account it was installed on.
+///
+/// This table holds NO CREDENTIAL. The App's private key is deployment-wide configuration
+/// (`GITHUB_APP_PRIVATE_KEY`, a Fly secret — ARCHITECTURE.md §9), and an installation ACCESS
+/// token is minted on demand from that key plus `installationId`, lives about an hour, and is
+/// never written down. That is the whole reason this design uses a GitHub App rather than
+/// storing an OAuth or personal access token per user: the row below is a pointer, so a
+/// database dump grants nobody write access to anybody's repository, and a user revoking the
+/// installation in GitHub's own UI takes effect immediately rather than whenever we notice.
+///
+/// Deliberately no `login`-uniqueness and no foreign key to `auth.users`, matching
+/// `Website.userId`'s own reasoning: Supabase Auth is the system of record for users, and the
+/// same GitHub account may legitimately be installed by two different signed-in users.
+model GithubInstallation {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  /// The signed-in user who completed the installation, holding an `auth.users(id)` value.
+  userId String @map("user_id") @db.Uuid
+
+  /// GitHub's own installation id, as returned to the setup callback. `BigInt` rather than
+  /// `Int`: GitHub's ids are 64-bit, and a 32-bit column is a bug with a date on it.
+  installationId BigInt @map("installation_id")
+
+  /// The account the App was installed on — `justinhe16`, or an org name. Display only, so a
+  /// user picking a repo can tell two installations apart. Refreshed whenever the callback
+  /// runs again; never trusted as an identifier.
+  accountLogin String @map("account_login")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  targets PublishTarget[]
+
+  /// One row per (user, installation). The same installation reached by two users is two rows,
+  /// because ownership of the CONNECTION is per-user even when the GitHub account is shared.
+  @@unique([userId, installationId])
+  @@index([userId])
+  @@map("github_installations")
+}
+
+/// Where one website's `llms.txt` is published, and how. At most one per website.
+model PublishTarget {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  /// Unique, which is what makes this a one-to-one — the same relationship `Schedule` has.
+  websiteId String  @unique @map("website_id") @db.Uuid
+  website   Website @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+
+  /// The installation whose token publishes here. `Restrict`, NOT `Cascade`: disconnecting an
+  /// installation while a website still points at it should fail loudly rather than silently
+  /// delete the user's publishing configuration. The service deletes dependent targets
+  /// explicitly, in the same transaction, so the intent is recorded in code rather than
+  /// inferred from a constraint.
+  installationRowId String             @map("installation_row_id") @db.Uuid
+  installation      GithubInstallation @relation(fields: [installationRowId], references: [id], onDelete: Restrict)
+
+  /// `owner/name`, stored split because every GitHub API path takes them separately and
+  /// re-splitting a joined string at each call site is one parser too many.
+  repoOwner String @map("repo_owner")
+  repoName  String @map("repo_name")
+
+  /// The branch a `pull_request` publication targets, or the branch a `commit` publication
+  /// writes to directly. The repository's default branch in practice; stored rather than
+  /// resolved per run so a publication is reproducible and a default-branch rename does not
+  /// silently retarget it.
+  baseBranch String @map("base_branch")
+
+  /// Where the artifact lands in the repo. `llms.txt` at the root is the convention the spec
+  /// implies, but a site served from `docs/` or `public/` needs its own answer.
+  path String @default("llms.txt")
+
+  mode PublishMode @default(pull_request)
+
+  /// Off by default, so connecting a repo is not the same act as authorizing writes to it.
+  /// Publishing is opt-in twice: once to install the App, once here.
+  active Boolean @default(false)
+
+  publications Publication[]
+
+  @@index([installationRowId])
+  @@map("publish_targets")
+}
+
+/// One attempt to publish one run's `llms.txt`, and what came of it.
+///
+/// Kept even when nothing was published — a `skipped_unchanged` row is the record that the
+/// system looked and found the index identical, which is the difference between "your schedule
+/// is working and your site has not changed" and "your schedule is broken." A missing row
+/// cannot tell those apart.
+model Publication {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+
+  /// The run whose artifact this published. `Cascade`, because a publication describes a run's
+  /// output and is meaningless once the run is gone.
+  runId String @map("run_id") @db.Uuid
+  run   Run    @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  targetId String        @map("target_id") @db.Uuid
+  target   PublishTarget @relation(fields: [targetId], references: [id], onDelete: Cascade)
+
+  status PublishStatus
+
+  /// The commit this created, on either publication mode. Null when nothing was committed.
+  commitSha String? @map("commit_sha")
+
+  /// The pull request, on `pull_request` mode only. Null on `commit` mode and on every
+  /// outcome that opened none.
+  prUrl    String? @map("pr_url")
+  prNumber Int?    @map("pr_number")
+
+  /// Set when `status` is `failed`. A publication failure never fails the run that produced
+  /// the artifact — the artifact is already stored and already correct.
+  error String?
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  /// The history query: this target's publications, newest first.
+  @@index([targetId, createdAt(sort: Desc)])
+  /// "Was this run already published?" — the idempotency read that keeps a retried run from
+  /// opening a second pull request for the same artifact.
+  @@index([runId])
+  @@map("publications")
 }
 
 // Real Postgres enums, not text with a CHECK: the worker writes status transitions
@@ -283,4 +416,28 @@ enum RunStatus {
   failed
 
   @@map("run_status")
+}
+
+
+/// How a publication writes to the repository.
+enum PublishMode {
+  /// Open a pull request from a generated branch. The default, because generated content
+  /// arriving unreviewed on a repository's main branch is a surprise, and a PR is also where
+  /// the run's own index diff can be shown to a human.
+  pull_request
+  /// Commit straight to `baseBranch`. For a repo whose owner wants the file to just be current.
+  commit
+
+  @@map("publish_mode")
+}
+
+/// How one publication attempt ended.
+enum PublishStatus {
+  /// The index was byte-identical to what the repository already had, so nothing was written.
+  /// The common outcome on a schedule over a site that has not changed.
+  skipped_unchanged
+  succeeded
+  failed
+
+  @@map("publish_status")
 }
