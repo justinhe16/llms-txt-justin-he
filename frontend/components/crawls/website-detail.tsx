@@ -7,14 +7,16 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { anyRunActive } from "@/lib/api/run-status";
 import { useUser } from "@/lib/auth/use-user";
+import { DETAIL_TABS, type DetailTab } from "@/lib/crawls/detail-tabs";
 import { rowStatusFromRunStatus, type RowStatus } from "@/lib/crawls/row-status";
-import { DETAIL_TABS, useDetailView, type DetailTab } from "@/lib/crawls/use-detail-view";
+import { useDetailView } from "@/lib/crawls/use-detail-view";
 import { flattenRunPages, useRunsInfinite } from "@/lib/query/use-runs-infinite";
 import { useWebsite } from "@/lib/query/use-website";
 
 import { CrawlOwner } from "./crawl-owner";
 import { CrawlsError } from "./crawls-error";
 import { EnrichmentPanel } from "./enrichment-panel";
+import { GithubConnectToast } from "./github-connect-toast";
 import { PublishPanel } from "./publish-panel";
 import { OutputTab } from "./output-tab";
 import { RunNowButton } from "./run-now-button";
@@ -27,6 +29,7 @@ const TAB_LABELS: Record<DetailTab, string> = {
   runs: "Runs",
   output: "Output",
   schedule: "Schedule",
+  publish: "Publish",
   trends: "Trends",
 };
 
@@ -52,8 +55,16 @@ const TAB_LABELS: Record<DetailTab, string> = {
  * asked to see.
  */
 export function WebsiteDetail({ websiteId }: { websiteId: string }) {
-  const { tab, selectedRunId, statsWindow, setTab, showRunOutput, setStatsWindow } =
-    useDetailView();
+  const {
+    tab,
+    selectedRunId,
+    statsWindow,
+    githubResult,
+    setTab,
+    showRunOutput,
+    setStatsWindow,
+    clearGithubResult,
+  } = useDetailView();
   const { user } = useUser();
 
   const websiteQuery = useWebsite(websiteId);
@@ -102,6 +113,13 @@ export function WebsiteDetail({ websiteId }: { websiteId: string }) {
         <ArrowLeft aria-hidden="true" className="size-4" />
         All crawls
       </Link>
+
+      {/* Rendered above the error ternary on purpose: a connect outcome still has to toast on a
+          page whose website read itself failed — GitHub's redirect and `GET /websites/{id}`
+          succeeding or failing are unrelated events, and burying this inside the success branch
+          would silently drop the toast on exactly the visit where a person most needs the
+          confirmation this ticket exists to add. */}
+      <GithubConnectToast result={githubResult} onShown={clearGithubResult} />
 
       {websiteQuery.isError ? (
         <div className="mt-6">
@@ -160,7 +178,15 @@ export function WebsiteDetail({ websiteId }: { websiteId: string }) {
             onValueChange={(value) => setTab(value as DetailTab)}
             className="mt-8 min-w-0"
           >
-            <TabsList variant="line" className="w-full justify-start border-b border-border">
+            {/* `overflow-x-auto`: five triggers at `flex-none px-3` no longer fit inside a
+                375px viewport without it — see R1 in the PR description. Fixed here, in the
+                app-specific consumer, rather than in `components/ui/tabs.tsx` — §8.4 forbids
+                app-specific edits to a generated primitive that every other `<Tabs>` in this
+                app also renders. */}
+            <TabsList
+              variant="line"
+              className="w-full justify-start overflow-x-auto border-b border-border"
+            >
               {DETAIL_TABS.map((name) => (
                 <TabsTrigger key={name} value={name} className="flex-none px-3">
                   {TAB_LABELS[name]}
@@ -208,16 +234,17 @@ export function WebsiteDetail({ websiteId }: { websiteId: string }) {
                 // header from ever disagreeing about how the last run went.
                 latestRun={runs[0] ?? null}
               />
-              {/* PER-194's opt-in toggle. No fifth tab — see EnrichmentPanel's own docstring
-                  for why this lives here, beside the schedule, rather than on its own tab. */}
+              {/* PER-194's opt-in toggle. Still no separate tab of its own — see
+                  EnrichmentPanel's own docstring for why one checkbox doesn't earn one, and
+                  for the distinction it now draws against PublishPanel, which did. */}
               <EnrichmentPanel
                 websiteId={websiteId}
                 ownerUserId={website?.user_id ?? null}
                 isOwner={isOwner}
               />
-              {/* Publishing sits beside the schedule for the same reason the enrichment toggle
-                  does — and because a schedule and what it publishes are one feature read
-                  top to bottom. See PublishPanel's own docstring. */}
+            </TabsContent>
+
+            <TabsContent value="publish" className="mt-6 min-w-0">
               <PublishPanel
                 websiteId={websiteId}
                 ownerUserId={website?.user_id ?? null}

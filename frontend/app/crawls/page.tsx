@@ -1,7 +1,9 @@
 import type { Metadata } from "next";
+import { Suspense } from "react";
 
 import { CrawlsHeader } from "@/components/crawls/crawls-header";
 import { CrawlsView } from "@/components/crawls/crawls-view";
+import { CrawlsGithubConnectToast } from "@/components/crawls/github-connect-toast";
 
 export const metadata: Metadata = {
   title: "Crawls · llms-text",
@@ -22,15 +24,25 @@ export const metadata: Metadata = {
  * (ARCHITECTURE.md §8.2) — a second check here would be both redundant and, being
  * client-visible, not actually a check.
  *
- * A server component holding two client islands. It fetches nothing itself: the table's data
- * arrives through React Query in the browser (see `CrawlsView`), which is what lets the same
- * query poll, dedupe and cache without this page re-rendering on the server every three
+ * A server component holding three client islands (`CrawlsHeader`'s own `UserMenu`,
+ * `CrawlsView`, and `CrawlsGithubConnectToast` below). It fetches nothing itself: the table's
+ * data arrives through React Query in the browser (see `CrawlsView`), which is what lets the
+ * same query poll, dedupe and cache without this page re-rendering on the server every three
  * seconds.
  */
 export default function CrawlsPage() {
   return (
     <div className="flex min-h-screen flex-col">
       <CrawlsHeader />
+
+      {/* useSearchParams() inside CrawlsGithubConnectToast needs a Suspense boundary during
+          static prerendering, or the build warns and bails — the same requirement `app/page.tsx`
+          states for AuthErrorToast. This is `/crawls`'s only reader of `?github=`; see that
+          component's own docstring for why a second one anywhere else on this page would be a
+          mistake. */}
+      <Suspense fallback={null}>
+        <CrawlsGithubConnectToast />
+      </Suspense>
 
       <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-8 sm:px-6">
         <div className="mb-6">

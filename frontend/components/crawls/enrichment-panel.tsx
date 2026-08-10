@@ -36,13 +36,16 @@ function EnrichmentPanelSkeleton() {
  * The per-website LLM enrichment opt-in — `PATCH /websites/{id}`'s one field, in a card
  * rendered beside `ScheduleTab` inside the existing "Schedule" tab (see `website-detail.tsx`).
  *
- * **No fifth tab.** The Schedule tab is already the only place an owner changes anything
+ * **No tab of its own.** The Schedule tab is already the only place an owner changes anything
  * about a website, already renders the exact "Only the owner (…) can …" copy this panel
- * reuses, and `WebsiteDetail` already computes and passes down `isOwner`/`ownerUserId`. A
- * fifth tab would mean editing `DETAIL_TABS`, the URL vocabulary, and `useDetailView`'s
- * guard — real churn for one checkbox. (A rename of the tab label to "Settings" was
- * considered and rejected for the same reason `schedule-tab.tsx`'s own docstring would give:
- * it would change a shipped `?tab=` value.)
+ * reuses, and `WebsiteDetail` already computes and passes down `isOwner`/`ownerUserId`. Editing
+ * `DETAIL_TABS`, the URL vocabulary, and `useDetailView`'s guard is real churn for one checkbox.
+ * (A rename of the tab label to "Settings" was considered and rejected for the same reason
+ * `schedule-tab.tsx`'s own docstring would give: it would change a shipped `?tab=` value.)
+ * `PublishPanel` did take a tab of its own — see that component's own docstring — and the
+ * distinction is not "publishing is more important," it is that publishing's configuration has
+ * an external round trip a URL has to be able to return to, and one checkbox never leaves this
+ * page in the first place.
  *
  * **No debounce, no draft module — deliberately unlike `use-schedule-editor.ts`.** That
  * module exists entirely for a ~500ms debounce over TWO controls (active/interval) sharing
