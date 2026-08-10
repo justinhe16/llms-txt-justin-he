@@ -511,6 +511,16 @@ _PREVIOUS_COMPLETED_INDEX: Final = """
 #   at all. A reviewer "tidying" the second pair to match the first's `COALESCE` breaks the
 #   null-vs-zero contract `RunStatsPoint.index_pages` documents, which is what
 #   `test_a_bucket_with_no_completed_run_reports_null_index_size_not_zero` exists to catch.
+#
+# **The curated-`llms.txt` ticket's addition, `RUN_STATS_VERSION` 13:** `index_pages` becomes
+# `links_emitted + links_optional`, not `links_emitted` alone, so the tile still means "pages
+# in the artifact" now that some of them render under `## Optional` instead of the main body
+# (`internals/llms_txt.py`'s `IndexCounts`). The inner `links_optional` guard defaults to `0`
+# — a pre-version-13 row simply adds nothing, reporting exactly what it always meant — but that
+# `0` stays INSIDE the addition and never leaks to the outer `ELSE NULL`: a bucket with no
+# completed run must still report an unknown index size, not a zero one, and wrapping the whole
+# expression in the same outer guard the six original columns already use is what keeps that
+# contract intact.
 _WEBSITE_STATS: Final = """
     WITH buckets AS (
         SELECT generate_series($2::timestamptz, $3::timestamptz - $4::interval, $4::interval)
@@ -533,6 +543,10 @@ _WEBSITE_STATS: Final = """
             CASE WHEN r.status = 'completed'
                       AND jsonb_typeof(r.stats -> 'links_emitted') = 'number'
                  THEN (r.stats ->> 'links_emitted')::bigint
+                      + CASE WHEN jsonb_typeof(r.stats -> 'links_optional') = 'number'
+                             THEN (r.stats ->> 'links_optional')::bigint
+                             ELSE 0
+                        END
                  ELSE NULL
             END AS index_pages,
             CASE WHEN r.status = 'completed'

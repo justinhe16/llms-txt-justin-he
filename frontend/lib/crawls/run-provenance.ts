@@ -83,8 +83,11 @@ export type SelectionState =
   | { kind: "breakdown"; rows: SelectionRow[]; droppedTotal: number; selected: number };
 
 /** What reached (or never reached) `llms.txt` — `"not_stored"` when this run never persisted
- * one, `"stored"` with the two counts otherwise. See `runProvenance`'s own docstring for why
- * the gate is `run.status === "completed"` rather than "does `stats.links_emitted` exist." */
+ * one, `"stored"` with the SIX counts otherwise (four omission reasons, plus a listed-not-
+ * dropped bucket and a fourth omission reason, both new at `RUN_STATS_VERSION` 13 — see
+ * `runProvenance`'s own docstring for the invariant all six now close). See `runProvenance`'s
+ * own docstring for why the gate is `run.status === "completed"` rather than "does
+ * `stats.links_emitted` exist." */
 export type IndexState =
   | { kind: "not_stored" }
   | {
@@ -102,6 +105,20 @@ export type IndexState =
        * on this site and answered by a different host. `0` on pre-version-12 rows, read the
        * same way as `omittedHttpError`. */
       omittedOffOrigin: number;
+      /** `stats.links_optional` (`RUN_STATS_VERSION` 13) — pages the curated index demoted to
+       * `## Optional` rather than the main body: still LISTED, still in `llms.txt` and
+       * `llms-full.txt`, just not in the curated top. `null`, NEVER `0`, on a pre-version-13
+       * row — that row's `llms.txt` had no Optional concept at all, so "how many pages were
+       * listed under Optional" has no answer to give, and `0` would silently claim a row from
+       * before this concept existed had an Optional section with nothing in it. See `runProvenance`'s
+       * docstring for why this field does NOT use the `?? 0` idiom the other five here do. */
+      listedOptional: number | null;
+      /** `stats.links_duplicate` (`RUN_STATS_VERSION` 13) — fetched, on-origin, non-empty, 2xx
+       * pages this run's own dedup pass collapsed into an already-kept survivor: fetched and
+       * real, but not a link anywhere in the artifact. `null`, NEVER `0`, on a pre-version-13
+       * row, for the identical reason `listedOptional` is — a row from before dedup existed
+       * has no answer to "how many pages did dedup collapse," and `0` would claim one. */
+      omittedDuplicate: number | null;
     };
 
 /**
@@ -343,18 +360,26 @@ export function selectionSelected(selection: SelectionState): number | null {
  *   (a): the seed has to be its own visible term in the funnel, or "selected -> fetched" reads
  *   as broken arithmetic. `frontierFetched` below is `pagesCrawled - 1` for exactly this
  *   reason — it excludes the seed so the comparison against `urlsSelected` is honest.
- * * `indexed + omittedEmpty + omittedHttpError + omittedOffOrigin === pagesCrawled` is the
- *   version-12 form of an invariant that used to have two terms. It gained the other two when
- *   the crawler began excluding non-2xx responses and cross-origin redirects from the index
- *   (`RUN_STATS_VERSION` 12): with only `omittedEmpty` to spend it on, the whole
- *   `pagesCrawled - indexed` gap was implicitly attributed to empty content, so a run that
- *   dropped four rate-limited pages reported four pages with "no extractable content" — the
- *   same false claim version 11 was written to stop making about blocked pages. Every term is
- *   an independently recorded fact —
- *   `stats.links_emitted`, `stats.pages_empty_content`, `stats.pages_http_error` and
- *   `stats.pages_off_origin` — rather than one derived from the others, matching
- *   `links_emitted`'s own docstring: "ask the artifact what it listed; do not
- *   reconstruct it."
+ * * `indexed + listedOptional + omittedEmpty + omittedHttpError + omittedOffOrigin +
+ *   omittedDuplicate === pagesCrawled` is the version-13 form of an invariant that started with
+ *   two terms and has now grown twice. It gained two terms when the crawler began excluding
+ *   non-2xx responses and cross-origin redirects from the index (`RUN_STATS_VERSION` 12): with
+ *   only `omittedEmpty` to spend it on, the whole `pagesCrawled - indexed` gap was implicitly
+ *   attributed to empty content, so a run that dropped four rate-limited pages reported four
+ *   pages with "no extractable content" — the same false claim version 11 was written to stop
+ *   making about blocked pages. It gains two MORE at version 13, for a different reason than
+ *   either previous two: a curated index (`internals/llms_txt.py`) can now DEMOTE a page to
+ *   `## Optional` (`listedOptional` — still indexed, so it is additive with `indexed` rather
+ *   than a fourth omission) or collapse it into a duplicate's survivor (`omittedDuplicate` — a
+ *   fourth genuine omission reason, invisible to every one of the first three because a
+ *   deduped page is fetched, on-origin, non-empty, and a 2xx). Every term is an independently
+ *   recorded fact — `stats.links_emitted`, `stats.links_optional`, `stats.pages_empty_content`,
+ *   `stats.pages_http_error`, `stats.pages_off_origin`, and `stats.links_duplicate` — rather
+ *   than one derived from the others, matching `links_emitted`'s own docstring: "ask the
+ *   artifact what it listed; do not reconstruct it." On a pre-version-13 row, `listedOptional`
+ *   and `omittedDuplicate` are both `null` rather than `0` — see `IndexState`'s own docstring —
+ *   so the six-term sum is not evaluable on such a row; the four-term version above still holds
+ *   for it.
  *
  * ## Fetch
  *
@@ -447,6 +472,10 @@ export function runProvenance(run: Pick<RunDetail, "status" | "stats">): RunProv
           omittedEmpty: finiteNumber(stats.pages_empty_content) ?? 0,
           omittedHttpError: finiteNumber(stats.pages_http_error) ?? 0,
           omittedOffOrigin: finiteNumber(stats.pages_off_origin) ?? 0,
+          // NEVER `?? 0` — see `IndexState`'s own docstring for why `null` on a pre-version-13
+          // row must survive as `null` rather than being read as "this run had none."
+          listedOptional: finiteNumber(stats.links_optional),
+          omittedDuplicate: finiteNumber(stats.links_duplicate),
         };
 
   return {

@@ -91,11 +91,29 @@ enrichment mode change is detected, only `metadata_changed` is marked not-compar
 other signal — added, removed, `urls_discovered_delta`, the new `content_changed`,
 `sections_delta`, `selection_churn` — is unaffected and reports normally, because none of them
 depends on what a bullet's title or description says.
+
+**This ticket (curated `llms.txt`) adds a FIFTH item to the no-transaction window —
+`_page_signals`, and it is not a network call at all.** `internals/llms_txt.py`'s selection
+pipeline now takes `signals: Mapping[str, PageSignals] | None` (ARCHITECTURE.md §3.4), and
+`_page_signals` is what builds it: `linked_from_seed` from the seed page's own already-fetched
+`content` (`internals/links.py`'s `extract_links`, pure and synchronous — no second fetch), and
+`sitemap_priority`/`lastmod` from `discovery.urls`, metadata a discovery step already collected
+before this run fetched anything. It sits right after `artifact_site_url` is resolved and
+before any of the four seam calls, keyed on `CrawledPage.url` with every URL on both sides
+normalized through `internals/url_ranking.py`'s `normalize_url` first (spec gap 1.5.2 —
+`extract_links` returns resolved-but-not-normalized URLs, and comparing those against
+already-normalized frontier URLs raw would silently miss on a trailing slash or a `utm_*`
+parameter and degrade `linked_from_seed` to `False` everywhere without ever raising). Like
+`_select_seed_links` beside it, `_page_signals` NEVER RAISES — a bug in it degrades this run's
+ranking to URL shape alone, exactly what `signals=None` already does for every hand-built test
+fixture, rather than failing the run.
 """
 
 import asyncio
 import logging
+from collections.abc import Sequence
 from dataclasses import replace
+from datetime import UTC, datetime
 from typing import Any, Final, Literal
 from uuid import UUID
 
@@ -129,10 +147,13 @@ from app.features.crawl.internals.index_diff import (
 )
 from app.features.crawl.internals.links import extract_links
 from app.features.crawl.internals.llms_txt import (
+    IndexCounts,
+    PageSignals,
     count_full_txt_truncations,
     count_indexed_pages,
     generate_llms_full_txt,
     generate_llms_txt,
+    rank_pages,
 )
 from app.features.crawl.internals.payload import (
     PAYLOAD_CONTENT_TYPE,
@@ -143,7 +164,12 @@ from app.features.crawl.internals.robots import ALLOW_ALL, RobotsRules, effectiv
 from app.features.crawl.internals.run_stats import build_run_stats
 from app.features.crawl.internals.sitemap import DiscoverySource, discover_sitemap_urls
 from app.features.crawl.internals.ssrf import SsrfBlockedError
-from app.features.crawl.internals.url_ranking import DiscoveredUrl, SelectionResult, select_urls
+from app.features.crawl.internals.url_ranking import (
+    DiscoveredUrl,
+    SelectionResult,
+    normalize_url,
+    select_urls,
+)
 from app.features.crawl.schemas import CrawledPage, CrawlOutcome
 from app.features.runs.schemas import RunDetailResponse
 from app.features.runs.service import RunService
@@ -410,6 +436,43 @@ def _safe_error_message(exc: Exception) -> str:
     return message[:_MAX_ERROR_LENGTH]
 
 
+def _to_utc(value: datetime) -> datetime:
+    """Normalize `value` to a timezone-aware UTC `datetime` — the same shape
+    `internals/url_ranking.py`'s own `_to_utc` gives (and `internals/llms_txt.py`'s copy of
+    it), reimplemented here rather than imported for the identical reason: it is `_`-private to
+    each module that needs it, and comparing a naive and an aware `datetime` raises `TypeError`
+    otherwise. Used only by `_merge_lastmod` below, to compare two `DiscoveredUrl.lastmod`
+    values that may each independently be naive or aware."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _merge_priority(existing: float | None, incoming: float | None) -> float | None:
+    """The larger of two declared `priority` values for the same normalized URL, `None` only
+    when both are — `internals/url_ranking.py`'s own `_merge_priority`, copied structurally
+    (that function is `_`-private) for `_page_signals`' own duplicate-merging need."""
+    if existing is None:
+        return incoming
+    if incoming is None:
+        return existing
+    return max(existing, incoming)
+
+
+def _merge_lastmod(existing: datetime | None, incoming: datetime | None) -> datetime | None:
+    """The later of two declared `lastmod` values for the same normalized URL, `None` only
+    when both are — `internals/url_ranking.py`'s own `_merge_lastmod`, copied structurally for
+    the identical reason `_merge_priority` above is. Compared through `_to_utc` so a naive/aware
+    mix can never raise; the value RETURNED is whichever original `datetime` won, not a
+    UTC-normalized copy — `internals/llms_txt.py`'s own `_recency_fraction` normalizes again
+    wherever it reads a `lastmod`, so this does not need to be the only place that does."""
+    if existing is None:
+        return incoming
+    if incoming is None:
+        return existing
+    return existing if _to_utc(existing) >= _to_utc(incoming) else incoming
+
+
 class CrawlService:
     """Business logic for one crawl run. Constructed once per job by `build_crawl_service`."""
 
@@ -532,14 +595,17 @@ class CrawlService:
         # Hoisted above the `try` so the `except` below can build a partial `stats` dict from
         # whatever this run actually managed before it failed, rather than reporting nothing
         # at all. `result` stays `None` for a failure that never got as far as `crawl_site`
-        # returning (e.g. `get_website` raising); `links_emitted` and `full_txt_truncated`
-        # stay 0 for a seed failure, where `result.stats["pages_crawled"]` is 0 anyway, and
-        # for any failure that happened before the artifacts were generated. They are hoisted
-        # rather than defaulted inside `build_run_stats` so that a partial-failure row carries
-        # the same KEYS as a success row — the shape `runs.stats` stores must not depend on
-        # how far a run got (`internals/run_stats.py`, `RUN_STATS_VERSION`).
+        # returning (e.g. `get_website` raising); `links_emitted`, `links_optional`,
+        # `links_duplicate`, and `full_txt_truncated` stay 0 for a seed failure, where
+        # `result.stats["pages_crawled"]` is 0 anyway, and for any failure that happened before
+        # the artifacts were generated. They are hoisted rather than defaulted inside
+        # `build_run_stats` so that a partial-failure row carries the same KEYS as a success
+        # row — the shape `runs.stats` stores must not depend on how far a run got
+        # (`internals/run_stats.py`, `RUN_STATS_VERSION`).
         result: CrawlResult | None = None
         links_emitted = 0
+        links_optional = 0
+        links_duplicate = 0
         full_txt_truncated = 0
         # Same reasoning again, for the four PER-180 counters: they stay 0 on every path that
         # never reached enrichment — a seed failure, a run with the flag off, a run where
@@ -767,6 +833,8 @@ class CrawlService:
                     stats=build_run_stats(
                         result.stats,
                         links_emitted=links_emitted,
+                        links_optional=links_optional,
+                        links_duplicate=links_duplicate,
                         full_txt_truncated=full_txt_truncated,
                         discovery_source=discovery_source,
                         urls_discovered=urls_discovered,
@@ -803,6 +871,15 @@ class CrawlService:
                 # that is never `None` at one call site is still a `str | None`.
                 artifact_site_url = result.seed_origin or website.url
 
+                # RANKING SIGNALS for `internals/llms_txt.py`'s curated-index seam — see this
+                # module's own docstring's "FIFTH item" paragraph, and `_page_signals`' own
+                # docstring for why this has to sit here (right after `artifact_site_url`, well
+                # before any of the four seam calls) and why it is NOT the same thing as
+                # `frontier_from_seed` above: that callback only ran when this run had no
+                # sitemap, so a site WITH a sitemap would otherwise never have its homepage's
+                # own links extracted at all. `_page_signals` never raises.
+                signals = self._page_signals(result, discovery.urls)
+
                 # ENRICHMENT, FIRST THING IN THIS BRANCH, BEFORE `generate_llms_txt`. This is
                 # the only place it can sit: `generate_llms_txt`/`generate_llms_full_txt` read
                 # `title`/`description` straight off each `CrawledPage` (`internals/llms_txt.py`),
@@ -834,8 +911,24 @@ class CrawlService:
                         enrich_unavailable_reason = "no_api_key"
                     else:
                         try:
+                            # RANKED, not `result.pages` in whatever order `crawl_site`'s
+                            # racing fetches happened to collect it. `internals/enrich.py`'s
+                            # own concurrency semaphore is acquired roughly in LIST order and
+                            # can time out before every page is sent, so handing it the
+                            # artifact's own rank order biases which pages finish enrichment
+                            # first toward the pages that will actually lead the artifact.
+                            # `rank_pages` shares `_select` with every other seam call, so this
+                            # can never disagree with what `generate_llms_txt` below actually
+                            # lists — see that function's own docstring. Selection itself does
+                            # not depend on enrichment either way (module docstring, "Selection
+                            # is enrichment-invariant"), so it is safe to rank BEFORE this pass
+                            # runs.
                             enrichment = await enrich_pages(
-                                self._anthropic, result.pages, settings=self._settings
+                                self._anthropic,
+                                rank_pages(
+                                    result.pages, site_url=artifact_site_url, signals=signals
+                                ),
+                                settings=self._settings,
                             )
                         except Exception:
                             # BELT-AND-BRACES. `enrich_pages` itself never raises for an API
@@ -897,7 +990,9 @@ class CrawlService:
                 # `site_url` is the origin both artifacts are ABOUT, and all four calls get
                 # the same one — see the `artifact_site_url` assignment above for why it
                 # prefers the seed's landing origin over the registered URL.
-                llms_txt = generate_llms_txt(artifact_pages, site_url=artifact_site_url)
+                llms_txt = generate_llms_txt(
+                    artifact_pages, site_url=artifact_site_url, signals=signals
+                )
 
                 # THE DIFF READ. No transaction is open here, and none may be opened around
                 # it — see the module docstring's "PER-193 added a FOURTH call" paragraph.
@@ -922,10 +1017,17 @@ class CrawlService:
                     enrich_applied=enrich_applied,
                 )
 
-                llms_full_txt = generate_llms_full_txt(artifact_pages, site_url=artifact_site_url)
-                links_emitted = count_indexed_pages(artifact_pages, site_url=artifact_site_url)
+                llms_full_txt = generate_llms_full_txt(
+                    artifact_pages, site_url=artifact_site_url, signals=signals
+                )
+                index_counts: IndexCounts = count_indexed_pages(
+                    artifact_pages, site_url=artifact_site_url, signals=signals
+                )
+                links_emitted = index_counts.main
+                links_optional = index_counts.optional
+                links_duplicate = index_counts.duplicate
                 full_txt_truncated = count_full_txt_truncations(
-                    artifact_pages, site_url=artifact_site_url
+                    artifact_pages, site_url=artifact_site_url, signals=signals
                 )
 
                 # `result.pages` — the ORIGINAL, extracted pages, never `artifact_pages` — is
@@ -959,6 +1061,8 @@ class CrawlService:
                 stats = build_run_stats(
                     result.stats,
                     links_emitted=links_emitted,
+                    links_optional=links_optional,
+                    links_duplicate=links_duplicate,
                     full_txt_truncated=full_txt_truncated,
                     discovery_source=discovery_source,
                     urls_discovered=urls_discovered,
@@ -1019,6 +1123,8 @@ class CrawlService:
                 build_run_stats(
                     result.stats,
                     links_emitted=links_emitted,
+                    links_optional=links_optional,
+                    links_duplicate=links_duplicate,
                     full_txt_truncated=full_txt_truncated,
                     discovery_source=discovery_source,
                     urls_discovered=urls_discovered,
@@ -1209,6 +1315,96 @@ class CrawlService:
             },
         )
         return selection
+
+    def _page_signals(
+        self, result: CrawlResult, discovery_urls: Sequence[DiscoveredUrl]
+    ) -> dict[str, PageSignals]:
+        """Build this run's ranking metadata for `internals/llms_txt.py`'s curated-index seam
+        — `linked_from_seed`, `sitemap_priority`, `lastmod` — keyed by `CrawledPage.url`
+        exactly as that seam requires (`PageSignals`'s own docstring). Pure and synchronous,
+        like `_select_seed_links` beside it, and holds the same contract: it NEVER RAISES
+        (`except Exception`, logged at WARNING, degrading to `{}` — every page then ranks on
+        URL shape and markdown length alone, exactly as it did before this ticket). Load-
+        bearing: this runs inside `execute_run`'s `try`, whose `except Exception` fails the
+        run outright.
+
+        **`frontier_from_seed` is NOT where `linked_from_seed` comes from.** That callback
+        only runs when `not discovery.urls` — a site with a sitemap never reaches it — so a
+        site with a sitemap would never have its homepage's own links extracted at all if this
+        method reused it. This ticket needs the seed's own links UNCONDITIONALLY, regardless
+        of whether a sitemap also existed, because the seed's own curation is the strongest
+        ranking signal `internals/llms_txt.py` has (`PageSignals.linked_from_seed`'s own
+        docstring).
+
+        **Normalization happens HERE, on the service side** (spec gap 1.5.2):
+        `extract_links` returns URLs "resolved, NOT normalized" (its own docstring), and
+        `CrawledPage.url` is the final post-redirect URL, so comparing either raw against the
+        other would miss on a trailing slash, a `utm_*` parameter, or case — silently, with
+        `linked_from_seed` reading `False` everywhere and ranking quietly degrading to URL
+        shape on every run. Every candidate is normalized with `normalize_url` — the SAME key
+        `select_urls` already dedupes candidates on — before it is ever compared, and the seam
+        then looks up `page.url` verbatim in the map this returns, importing nothing.
+
+        Args:
+            result: This run's own `CrawlResult` — `result.pages` (never `artifact_pages`; the
+                same "read the original, pre-enrichment list" reasoning `content_hashes` above
+                already gives) for the seed page's raw `content`, and `result.seed_page_url` to
+                find which page IS the seed.
+            discovery_urls: `discovery.urls` — this run's `DiscoveredUrl`s, for
+                `sitemap_priority`/`lastmod`. Duplicates (the same normalized URL discovered
+                more than once) are merged order-independently — the max `priority`, the
+                latest `lastmod` — the same "Why a duplicate's metadata is merged" argument
+                `internals/url_ranking.py`'s module docstring makes for its own duplicate
+                handling; `_merge_priority`/`_merge_lastmod` below copy that structure rather
+                than importing it (both are `_`-private to that module).
+
+        Returns:
+            `{page.url: PageSignals(...)}` for every page in `result.pages` — never a partial
+            map for a successful call, and `{}` on any exception at all.
+        """
+        try:
+            seed_page = next(
+                (page for page in result.pages if page.url == result.seed_page_url), None
+            )
+            seed_links: set[str] = set()
+            if seed_page is not None:
+                seed_links = {
+                    normalize_url(url) or url
+                    for url in extract_links(seed_page.content, base_url=seed_page.url)
+                }
+
+            discovered: dict[str, DiscoveredUrl] = {}
+            for entry in discovery_urls:
+                key = normalize_url(entry.url) or entry.url
+                existing = discovered.get(key)
+                discovered[key] = (
+                    entry
+                    if existing is None
+                    else DiscoveredUrl(
+                        url=existing.url,
+                        lastmod=_merge_lastmod(existing.lastmod, entry.lastmod),
+                        priority=_merge_priority(existing.priority, entry.priority),
+                        source=existing.source,
+                    )
+                )
+
+            signals: dict[str, PageSignals] = {}
+            for page in result.pages:
+                key = normalize_url(page.url) or page.url
+                discovered_entry = discovered.get(key)
+                signals[page.url] = PageSignals(
+                    linked_from_seed=key in seed_links,
+                    sitemap_priority=(
+                        discovered_entry.priority if discovered_entry is not None else None
+                    ),
+                    lastmod=discovered_entry.lastmod if discovered_entry is not None else None,
+                )
+            return signals
+        except Exception:
+            logger.warning(
+                "crawl: could not build ranking signals; continuing with none", exc_info=True
+            )
+            return {}
 
     async def _finish_failed_attempt(
         self,

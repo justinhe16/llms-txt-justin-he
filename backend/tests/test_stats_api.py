@@ -169,18 +169,29 @@ def _stats_with_diff(
     *,
     pages_crawled: int = 1,
     links_emitted: int = 1,
+    links_optional: int | None = None,
     llms_txt_bytes: int = 100,
     index_diff: Any = None,
 ) -> dict[str, Any]:
     """A `RUN_STATS_VERSION` 8-shaped `stats` dict, carrying only the keys the queries and
-    `_to_latest` under test actually read."""
-    return {
+    `_to_latest` under test actually read.
+
+    `links_optional` defaults to `None` — ABSENT from the returned dict, never a `0` key — so
+    every test that does not pass it stays a genuine pre-`RUN_STATS_VERSION`-13 fixture,
+    exercising the same "no `links_optional` key at all" path a real pre-13 row is in. A test
+    that wants to exercise the version-13 `links_emitted + links_optional` sum passes an
+    explicit `int`."""
+    stats: dict[str, Any] = {
         "pages_crawled": pages_crawled,
         "links_emitted": links_emitted,
         "llms_txt_bytes": llms_txt_bytes,
         "index_diff": index_diff,
         "version": 8,
     }
+    if links_optional is not None:
+        stats["links_optional"] = links_optional
+        stats["version"] = 13
+    return stats
 
 
 # -----------------------------------------------------------------------------------------
@@ -663,6 +674,64 @@ async def test_index_size_is_the_last_completed_run_in_the_bucket_not_the_max(
     assert bucket["index_bytes"] == 900
 
 
+async def test_a_pre_version_13_row_reports_links_emitted_alone_as_index_pages(
+    user_client: AsyncClient, websites_db: Pool
+) -> None:
+    """A row with no `links_optional` key at all — every row before the curated-index ticket
+    — reports `index_pages` as exactly `links_emitted`, its pre-13 meaning: that key adds
+    nothing it never had, because `_WEBSITE_STATS`'s inner `links_optional` guard defaults to
+    `0` only INSIDE the `links_emitted` sum, never as a separate contribution the outer
+    `status = 'completed'` guard could turn into a false zero."""
+    website_id = await seed_website(
+        websites_db, TEST_USER_A_ID, "https://stats-pre-v13-index.example"
+    )
+    window = resolve_window("14d", _NOW)
+    target_bucket = window.start + timedelta(days=3)
+
+    await seed_run(
+        websites_db,
+        website_id,
+        started_at=target_bucket + timedelta(hours=1),
+        completed_at=target_bucket + timedelta(hours=1, seconds=1),
+        status="completed",
+        stats=_stats_with_diff(links_emitted=12, llms_txt_bytes=1_200, index_diff=None),
+    )
+
+    response = await user_client.get(f"/websites/{website_id}/stats", params={"window": "14d"})
+
+    assert response.status_code == 200
+    bucket = _series_bucket(response.json()["series"], target_bucket)
+    assert bucket["index_pages"] == 12
+
+
+async def test_a_version_13_row_sums_main_and_optional_links_as_index_pages(
+    user_client: AsyncClient, websites_db: Pool
+) -> None:
+    """The curated-index ticket's own redefinition: once `links_optional` is recorded,
+    `index_pages` is the SUM — the tile keeps its "pages in the artifact" meaning even though
+    some of them now render under `## Optional` rather than the main body."""
+    website_id = await seed_website(websites_db, TEST_USER_A_ID, "https://stats-v13-index.example")
+    window = resolve_window("14d", _NOW)
+    target_bucket = window.start + timedelta(days=3)
+
+    await seed_run(
+        websites_db,
+        website_id,
+        started_at=target_bucket + timedelta(hours=1),
+        completed_at=target_bucket + timedelta(hours=1, seconds=1),
+        status="completed",
+        stats=_stats_with_diff(
+            links_emitted=12, links_optional=5, llms_txt_bytes=1_200, index_diff=None
+        ),
+    )
+
+    response = await user_client.get(f"/websites/{website_id}/stats", params={"window": "14d"})
+
+    assert response.status_code == 200
+    bucket = _series_bucket(response.json()["series"], target_bucket)
+    assert bucket["index_pages"] == 17
+
+
 async def test_a_bucket_with_no_completed_run_reports_null_index_size_not_zero(
     user_client: AsyncClient, websites_db: Pool
 ) -> None:
@@ -784,6 +853,34 @@ async def test_latest_reports_the_newest_completed_run_in_the_window(
     assert latest["run_id"] == str(newer_id)
     assert latest["index_pages"] == 7
     assert latest["index_bytes"] == 777
+
+
+async def test_latest_sums_main_and_optional_links_when_recorded(
+    user_client: AsyncClient, websites_db: Pool
+) -> None:
+    """`LatestRunSnapshot.index_pages` — `runs/service.py`'s `_index_pages` helper — holds the
+    identical version-13 redefinition `_WEBSITE_STATS`'s SQL does for the bucketed series:
+    `links_emitted + links_optional` once the row records both."""
+    website_id = await seed_website(websites_db, TEST_USER_A_ID, "https://stats-latest-v13.example")
+
+    run_id = await seed_run(
+        websites_db,
+        website_id,
+        started_at=_NOW - timedelta(hours=1),
+        completed_at=_NOW - timedelta(hours=1),
+        status="completed",
+        stats=_stats_with_diff(
+            links_emitted=7, links_optional=3, llms_txt_bytes=777, index_diff=None
+        ),
+    )
+
+    response = await user_client.get(f"/websites/{website_id}/stats")
+
+    assert response.status_code == 200
+    latest = response.json()["latest"]
+    assert latest is not None
+    assert latest["run_id"] == str(run_id)
+    assert latest["index_pages"] == 10
 
 
 async def test_latest_is_null_when_the_window_has_no_completed_run(

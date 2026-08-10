@@ -33,7 +33,7 @@ from app.features.crawl.internals.index_diff import (
     build_index_diff,
     parse_index,
 )
-from app.features.crawl.internals.llms_txt import generate_llms_txt
+from app.features.crawl.internals.llms_txt import MAX_MAIN_BODY_LINKS, generate_llms_txt
 from app.features.crawl.internals.url_ranking import normalize_url
 from app.features.crawl.schemas import CrawledPage
 
@@ -60,14 +60,21 @@ def _page(
     *,
     title: str | None = None,
     description: str | None = None,
-    markdown: str = _BODY,
+    markdown: str | None = None,
     is_empty: bool = False,
 ) -> CrawledPage:
     """A `CrawledPage` with only the fields `generate_llms_txt`/`build_content_hashes` read
     spelled out, mirroring `tests/test_llms_txt.py`'s own helper of the same name —
     `is_empty=False` by default, since most tests in this file are about a page that IS
     indexed; the content-hash tests below override it to prove `build_content_hashes` never
-    reads it."""
+    reads it.
+
+    `markdown` defaults to `_BODY` plus a clause naming `url`, UNIQUE per call site — the same
+    fix `tests/test_llms_txt.py`'s own `_page` applies, and for the identical reason: dedup
+    now fingerprints on the body alone, so two DIFFERENT pages built with the literal same
+    `_BODY` would silently collapse into one entry inside a single `generate_llms_txt` call. A
+    test that means to exercise a body-hash comparison passes an explicit `markdown=` naming
+    its own relationship to `_BODY` (e.g. unchanged across two runs, or a genuine change)."""
     return CrawledPage(
         url=url,
         status=200,
@@ -76,7 +83,7 @@ def _page(
         fetched_at=datetime(2026, 1, 1, tzinfo=UTC),
         content_bytes=0,
         description=description,
-        markdown=markdown,
+        markdown=markdown if markdown is not None else f"{_BODY} Unique to {url}.",
         is_empty=is_empty,
         blocked_reason=None,
     )
@@ -144,6 +151,14 @@ def test_parse_index_round_trips_generate_llms_txt(site_url=_SITE) -> None:
     `urllib.parse.unquote`). Hand-written expected tuples, not a self-consistency check —
     `parse_index(generate_llms_txt(pages, site_url=_SITE)) == pages` would still pass if both sides of the
     round trip shared the same bug.
+
+    Extended, not replaced, by the curated-index ticket: a third page that lands under
+    `## Optional` (an always-Optional URL), asserting `IndexEntry.optional` alongside the
+    original four fields. The adversarial second page's own section changes from "A (b)" to
+    "Other" under this ticket — it is a DERIVED section with exactly one entry, and
+    consolidation now folds a lone derived section into `Other` (spec §3c); this is the
+    curated-index behaviour the round trip is now pinned against, not a regression in the
+    round trip itself.
     """
     pages = [
         _page("https://example.test/docs/intro", title="Intro"),
@@ -152,25 +167,31 @@ def test_parse_index_round_trips_generate_llms_txt(site_url=_SITE) -> None:
             title="A [Note] \\ Title",
             description='A <desc> with "quotes" and [brackets]',
         ),
+        _page("https://example.test/privacy", title="Privacy Policy"),
     ]
 
     output = generate_llms_txt(pages, site_url=_SITE)
     entries = parse_index(output)
 
-    actual = [(entry.section, entry.url, entry.title, entry.description) for entry in entries]
+    actual = [
+        (entry.section, entry.url, entry.title, entry.description, entry.optional)
+        for entry in entries
+    ]
     assert actual == [
-        ("Docs", "https://example.test/docs/intro", "Intro", None),
+        ("Docs", "https://example.test/docs/intro", "Intro", None, False),
         (
-            "A (b)",
+            "Other",
             "https://example.test/a (b)/c d?x=%2Fy",
             "A [Note] \\ Title",
             'A <desc> with "quotes" and [brackets]',
+            False,
         ),
+        ("Optional", "https://example.test/privacy", "Privacy Policy", None, True),
     ]
 
 
 def test_parse_index_returns_nothing_for_the_empty_document() -> None:
-    assert parse_index(llms_txt._EMPTY_DOCUMENT) == []
+    assert parse_index(llms_txt._empty_document(_SITE)) == []
 
 
 # -----------------------------------------------------------------------------------------
@@ -219,6 +240,31 @@ def test_a_title_change_on_the_same_url_is_a_change_not_an_add_and_a_remove() ->
         {"url": "https://example.test/docs/intro", "title": "New Title"}
     ]
     assert diff["metadata_not_comparable_reason"] is None
+
+
+def test_a_page_demoted_to_optional_is_still_indexed_not_an_add_plus_a_remove() -> None:
+    """`IndexEntry.optional` is new; added/removed semantics are NOT keyed on it — they stay
+    keyed on `IndexEntry.key`, the URL set (`build_index_diff`'s own docstring). A page that
+    drops from the main body to `## Optional` (here, pushed out by the main-body cap) is
+    indexed on both sides of the diff and must not read as one page removed and a different
+    one added."""
+    demoted = _page("https://example.test/docs/zzz-lowest", title="X")
+    previous_txt = generate_llms_txt([demoted], site_url=_SITE)
+    others = [
+        _page(f"https://example.test/docs/{index:03d}", title=f"D{index}")
+        for index in range(MAX_MAIN_BODY_LINKS)
+    ]
+    current_txt = generate_llms_txt([demoted, *others], site_url=_SITE)
+
+    diff = _diff(
+        current_llms_txt=current_txt,
+        current_urls_discovered=MAX_MAIN_BODY_LINKS + 1,
+        previous=_previous(previous_txt, urls_discovered=1),
+        previous_run_completed=True,
+    )
+
+    assert diff["pages_removed"] == 0, "the demoted page is still indexed, just under Optional"
+    assert diff["pages_added"] == MAX_MAIN_BODY_LINKS
 
 
 def test_a_description_change_alone_counts_as_changed() -> None:
@@ -275,7 +321,7 @@ def test_samples_are_deterministic_under_a_shuffled_input() -> None:
     ordered_txt = "# Test\n\n> summary\n\n## Docs\n\n" + "\n".join(bullets) + "\n"
     shuffled_txt = "# Test\n\n> summary\n\n## Docs\n\n" + "\n".join(shuffled_bullets) + "\n"
 
-    previous = _previous(llms_txt._EMPTY_DOCUMENT, urls_discovered=0)
+    previous = _previous(llms_txt._empty_document(_SITE), urls_discovered=0)
 
     ordered_diff = _diff(
         current_llms_txt=ordered_txt,
@@ -322,9 +368,9 @@ def test_sections_delta_lists_only_sections_that_changed() -> None:
 
 def test_selection_churn_ratio_is_none_when_both_indexes_are_empty() -> None:
     diff = _diff(
-        current_llms_txt=llms_txt._EMPTY_DOCUMENT,
+        current_llms_txt=llms_txt._empty_document(_SITE),
         current_urls_discovered=0,
-        previous=_previous(llms_txt._EMPTY_DOCUMENT, urls_discovered=0),
+        previous=_previous(llms_txt._empty_document(_SITE), urls_discovered=0),
         previous_run_completed=True,
     )
 
@@ -336,9 +382,9 @@ def test_urls_discovered_delta_is_none_when_the_previous_run_recorded_none() -> 
     """A previous row that predates `RUN_STATS_VERSION` 4 has no `urls_discovered` of its
     own — `None`, not `0`, is what a delta against an unknown value must be."""
     diff = _diff(
-        current_llms_txt=llms_txt._EMPTY_DOCUMENT,
+        current_llms_txt=llms_txt._empty_document(_SITE),
         current_urls_discovered=10,
-        previous=_previous(llms_txt._EMPTY_DOCUMENT, urls_discovered=None),
+        previous=_previous(llms_txt._empty_document(_SITE), urls_discovered=None),
         previous_run_completed=True,
     )
 
@@ -347,7 +393,7 @@ def test_urls_discovered_delta_is_none_when_the_previous_run_recorded_none() -> 
 
 def test_a_first_run_block_carries_no_metrics() -> None:
     diff = _diff(
-        current_llms_txt=llms_txt._EMPTY_DOCUMENT,
+        current_llms_txt=llms_txt._empty_document(_SITE),
         current_urls_discovered=0,
         previous=None,
         previous_run_completed=None,
@@ -359,7 +405,7 @@ def test_a_first_run_block_carries_no_metrics() -> None:
 
 def test_previous_run_completed_is_threaded_through_both_states() -> None:
     first_run = _diff(
-        current_llms_txt=llms_txt._EMPTY_DOCUMENT,
+        current_llms_txt=llms_txt._empty_document(_SITE),
         current_urls_discovered=0,
         previous=None,
         previous_run_completed=False,
@@ -368,9 +414,9 @@ def test_previous_run_completed_is_threaded_through_both_states() -> None:
     assert first_run["previous_run_completed"] is False
 
     compared = _diff(
-        current_llms_txt=llms_txt._EMPTY_DOCUMENT,
+        current_llms_txt=llms_txt._empty_document(_SITE),
         current_urls_discovered=0,
-        previous=_previous(llms_txt._EMPTY_DOCUMENT, urls_discovered=0),
+        previous=_previous(llms_txt._empty_document(_SITE), urls_discovered=0),
         previous_run_completed=True,
     )
     assert compared["state"] == "compared"
@@ -407,7 +453,7 @@ def test_sample_titles_are_truncated_at_the_documented_cap() -> None:
     diff = _diff(
         current_llms_txt=current_txt,
         current_urls_discovered=1,
-        previous=_previous(llms_txt._EMPTY_DOCUMENT, urls_discovered=0),
+        previous=_previous(llms_txt._empty_document(_SITE), urls_discovered=0),
         previous_run_completed=True,
     )
 
@@ -440,8 +486,9 @@ def test_content_hashes_are_keyed_by_the_same_normalized_form_index_entries_use(
 def test_content_changed_counts_only_keys_whose_body_hash_differs() -> None:
     previous_page = _page("https://example.test/docs/a", markdown=_BODY)
     current_page_changed = _page("https://example.test/docs/a", markdown=_BODY + " Changed body.")
-    unchanged_page_previous = _page("https://example.test/docs/b", markdown=_BODY)
-    unchanged_page_current = _page("https://example.test/docs/b", markdown=_BODY)
+    unchanged_body = _BODY + " This page's own body, unchanged across both runs."
+    unchanged_page_previous = _page("https://example.test/docs/b", markdown=unchanged_body)
+    unchanged_page_current = _page("https://example.test/docs/b", markdown=unchanged_body)
 
     previous_txt = generate_llms_txt([previous_page, unchanged_page_previous], site_url=_SITE)
     current_txt = generate_llms_txt([current_page_changed, unchanged_page_current], site_url=_SITE)
@@ -543,8 +590,16 @@ def test_a_mode_change_still_reports_a_genuine_content_change() -> None:
     kept_current = _page(
         "https://example.test/docs/kept", markdown=_BODY + " A genuine body change.", title="Kept"
     )
-    removed_page = _page("https://example.test/docs/removed", markdown=_BODY, title="Removed")
-    added_page = _page("https://example.test/guide/added", markdown=_BODY, title="Added")
+    removed_page = _page(
+        "https://example.test/docs/removed",
+        markdown=_BODY + " The removed page's own body.",
+        title="Removed",
+    )
+    added_page = _page(
+        "https://example.test/guide/added",
+        markdown=_BODY + " The added page's own body.",
+        title="Added",
+    )
 
     previous_txt = generate_llms_txt([kept_previous, removed_page], site_url=_SITE)
     current_txt = generate_llms_txt([kept_current, added_page], site_url=_SITE)

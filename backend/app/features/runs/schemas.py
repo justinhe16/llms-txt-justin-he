@@ -242,14 +242,16 @@ class RunStatsPoint(BaseModel):
     `pages_added`."""
 
     index_pages: int | None
-    """The generated index's page count (`runs.stats["links_emitted"]`) of the LAST
-    completed run in this bucket that recorded one — never a sum or an average across the
-    bucket, since an index size is a snapshot, not a quantity buckets accumulate. **`null`,
-    never `0`, when no completed run in this bucket recorded one** — a bucket where nothing
-    finished has an UNKNOWN index size, not a zero one. Contrast `pages_added`/
-    `pages_removed` above, whose `0` is a real measurement: those are things that happened
-    (or did not) in the bucket, this is a state the bucket may simply have no evidence
-    about."""
+    """The generated index's page count (`runs.stats["links_emitted"] + runs.stats
+    ["links_optional"]`, as of `RUN_STATS_VERSION` 13 — a page under `## Optional` is still in
+    the artifact, so it still counts here; a pre-version-13 row simply has no `links_optional`
+    to add) of the LAST completed run in this bucket that recorded one — never a sum or an
+    average across the bucket, since an index size is a snapshot, not a quantity buckets
+    accumulate. **`null`, never `0`, when no completed run in this bucket recorded one** — a
+    bucket where nothing finished has an UNKNOWN index size, not a zero one. Contrast
+    `pages_added`/`pages_removed` above, whose `0` is a real measurement: those are things
+    that happened (or did not) in the bucket, this is a state the bucket may simply have no
+    evidence about."""
 
     index_bytes: int | None
     """`runs.stats["llms_txt_bytes"]` of that same last completed run — same null-vs-zero
@@ -430,8 +432,11 @@ class LatestRunSnapshot(BaseModel):
     """Typed optional to match the column; a `completed` row has one in practice."""
 
     index_pages: int | None
-    """This run's own `runs.stats["links_emitted"]` — `None` only if that key is somehow
-    unreadable on an otherwise-completed row, never a fabricated `0`."""
+    """This run's own `runs.stats["links_emitted"] + runs.stats["links_optional"]` (see the
+    identical field on `RunStatsPoint` above for why the sum, as of `RUN_STATS_VERSION` 13) —
+    `None` only if `links_emitted` itself is somehow unreadable on an otherwise-completed row,
+    never a fabricated `0`. A pre-version-13 row reports `links_emitted` alone, which is
+    exactly what it always meant."""
 
     index_bytes: int | None
     """This run's own `runs.stats["llms_txt_bytes"]`, same null rule as `index_pages`."""

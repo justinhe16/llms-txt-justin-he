@@ -67,26 +67,40 @@ downstream of a fetched page stays behind one seam:
 
 ```python
 def generate_llms_txt(                                       # the llms.txt index
-    pages: list[CrawledPage], *, site_url: str
+    pages: list[CrawledPage], *, site_url: str,
+    signals: Mapping[str, PageSignals] | None = None,
 ) -> str:
     ...
 
 def generate_llms_full_txt(                                  # the llms-full.txt expansion
-    pages: list[CrawledPage], *, site_url: str
+    pages: list[CrawledPage], *, site_url: str,
+    signals: Mapping[str, PageSignals] | None = None,
 ) -> str:
     ...
 ```
 
 They live in `backend/app/features/crawl/internals/llms_txt.py`. **They are no longer stubs**
-— PER-179 replaced the placeholder with the real llmstxt.org format — but they are still
-pure, deterministic and **model-free**, and that last part is a rule rather than a status
-report: the model-assisted pass is a layer *above* these functions, and this deterministic
-path is the fallback it degrades to when its flag is off or its API call fails. Nothing in
-this module may grow a network call. `CrawledPage`, not `Page` — `app.core.pagination.Page`
-is already taken (ARCHITECTURE.md §3.4).
+— PER-179 replaced the placeholder with the real llmstxt.org format, and a later ticket
+replaced the one-bullet-per-page dump that shipped with a curated index: a ranked, capped main
+body plus an `## Optional` section for legal pages, brand assets, and overflow, rather than
+every surviving page alphabetized under its URL's leading segment. Both are still pure,
+deterministic and **model-free**, and that last part is a rule rather than a status report:
+the model-assisted pass is a layer *above* these functions, and this deterministic path is the
+fallback it degrades to when its flag is off or its API call fails. Nothing in this module may
+grow a network call. `CrawledPage`, not `Page` — `app.core.pagination.Page` is already taken
+(ARCHITECTURE.md §3.4). `signals` (`PageSignals`) is ranking metadata a discovery step already
+collected before any page was fetched — reading it is not a network call either.
 
-Build against those signatures, and do not widen them without a ticket that redesigns the
-seam. Do not scatter crawling, parsing, or LLM-calling logic through the services.
+**Selection never depends on `title` or `description`.** `internals/enrich.py` can rewrite a
+page's label on some pages of a run and not others (it keeps partial results on its own
+timeout, by design) — so which pages are indexed, how they are grouped, the main-body/Optional
+split, and their order must be, and are, identical whether or not enrichment ran, or which
+pages it reached. Only a label is free to vary with the flag.
+
+Build against those signatures, and do not widen them a third time without a ticket that
+redesigns the seam — `signals` was the second widening, and this file and ARCHITECTURE.md §3.4
+both required exactly the ticket that added it. Do not scatter crawling, parsing, or
+LLM-calling logic through the services.
 
 **10. Publishing to GitHub may never fail a run, and never stores a credential.** Two
 rules, both cheap to break and expensive to discover.

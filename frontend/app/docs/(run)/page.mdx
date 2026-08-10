@@ -168,10 +168,16 @@ under either setting.
 
 A run writes two files.
 
-`llms.txt` is the index. It opens with one `#` heading naming the site and one blockquote
-counting the pages. Each following `##` section holds one `- [title](url): description` line
-per page. Sections run `Docs`, `Guide`, `API`, `Reference`, then the remaining groups
-alphabetically, then `Other`.
+`llms.txt` is a curated index, not a dump of every page a run fetched. It opens with one `#`
+heading naming the site and one blockquote — a sentence about the site itself, drawn from its
+own homepage, not a count of pages. Next, optionally, a short paragraph of context and, when
+some pages were left out of the main sections, one sentence explaining that convention. Each
+following `##` section holds one `- [title](url): description` line per page, ranked rather
+than alphabetized, so the pages most useful for understanding the site lead their section.
+Sections run `Overview`, `Product`, `Docs`, `Guides`, `API`, `Reference`, `Research & Data`,
+`Comparisons`, `Customers`, `Company`, `Blog`, then any other groups the site's own URLs imply.
+A curated main body holds at most 30 links; legal pages, brand assets, archives, and anything
+past that cap are grouped under a final `## Optional` section instead of being dropped.
 
 `llms-full.txt` holds the same pages in the same order, each followed by its full Markdown. A
 page is trimmed at 50 KiB. The document is trimmed at 5 MiB, always at a page boundary. A

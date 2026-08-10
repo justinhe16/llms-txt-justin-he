@@ -401,6 +401,12 @@ export const PROVENANCE_SEGMENTS = {
   omittedEmpty: "Omitted as empty",
   omittedHttpError: "Omitted: not a page",
   omittedOffOrigin: "Omitted: another site",
+  // `RUN_STATS_VERSION` 13 (the curated-index ticket): a page grouped under `## Optional` is
+  // carried forward into the artifact, not lost — it names a FACT ("this page is here, just
+  // not in the main body"), never failure language, the same rule every segment on this list
+  // already follows.
+  listedOptional: "Listed under Optional",
+  omittedDuplicate: "Omitted: duplicate",
 } as const;
 
 /**
