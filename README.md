@@ -303,9 +303,13 @@ is currently no way to change that while the OAuth toggle stays on.
 If the toggle is ever turned off, set the Setup URL to the same `/api/github/callback` address —
 the route reads only `installation_id`, `setup_action`, and `state`, none of which depend on how
 the user arrived, so it works unchanged either way. That also makes **Redirect on update** live:
-turn it on and GitHub will send the user back through that same Setup URL — and so back to the
-Publish tab — after they add or remove a repository from an existing installation, not only after
-the initial install.
+turn it on and GitHub will send the user back through that same Setup URL after they add or remove
+a repository from an existing installation, not only after the initial install. They land on
+`/crawls` rather than on a site's Publish tab, though, and that is not a gap to close here: `state`
+is attached by the install link in `ConnectPrompt`, which only renders while the account has no
+installation at all. A user editing an existing installation's repository access gets there through
+GitHub's own settings page, which has no `state` to echo back — so `githubCallbackPath` sees none
+and falls back to the list, exactly as it is designed to.
 
 **The `code` this route never reads is a known gap, not an oversight.**
 `PublishService.connect_installation` verifies the installation id against GitHub with this
