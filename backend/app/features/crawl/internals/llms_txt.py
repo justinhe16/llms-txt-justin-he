@@ -186,7 +186,7 @@ keeps this from becoming a second, driftable notion of "the pages that matter."
 import hashlib
 import re
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Final
@@ -521,6 +521,7 @@ _CANONICAL_TAXONOMY: Final[tuple[tuple[str, frozenset[str]], ...]] = (
                 "pricing",
                 "integrations",
                 "integration",
+                "enterprise",
             }
         ),
     ),
@@ -528,7 +529,16 @@ _CANONICAL_TAXONOMY: Final[tuple[tuple[str, frozenset[str]], ...]] = (
     (
         "Guides",
         frozenset(
-            {"guide", "guides", "tutorial", "tutorials", "how-to", "howto", "getting-started"}
+            {
+                "guide",
+                "guides",
+                "tutorial",
+                "tutorials",
+                "how-to",
+                "howto",
+                "getting-started",
+                "instructions",
+            }
         ),
     ),
     ("API", frozenset({"api", "apis"})),
@@ -627,24 +637,46 @@ def _is_origin_root_url(url: str, origin: str) -> bool:
     )
 
 
+def _segment_vocabulary(url: str) -> frozenset[str]:
+    """Every whole path segment of `url`, lowercased, PLUS every hyphen-separated word inside
+    each segment — the matching surface both the canonical taxonomy and the always-Optional
+    rules compare against. `/reports-guides/x` yields `{"reports-guides", "reports",
+    "guides"}`, not only the compound whole segment.
+
+    **Still URL-only, and still not title matching** — this widens WHICH PART of the URL is
+    read, not WHAT FIELD is read. Found necessary on a real site (step 9 follow-up): a
+    URL-segment vocabulary built for single-word segments (`/docs/`, `/blog/`) silently misses
+    a site whose own information architecture uses compound, hyphenated slugs
+    (`/reports-guides/`, `/vulnerability-reporting/`, `/contact-sales/`) — the exact same
+    words this module already looks for, just not alone in their own segment. Splitting every
+    segment on `-` and matching sub-words IN ADDITION TO the whole segment is what catches
+    both spellings with one vocabulary table rather than two."""
+    segments = [segment.lower() for segment in _path_segments(url)]
+    words: set[str] = set(segments)
+    for segment in segments:
+        words.update(segment.split("-"))
+    return frozenset(words)
+
+
 def _section_for(url: str, origin: str) -> str:
     """Which H2 `url` would land under if it survives to the main body.
 
     `Overview` first and only for `origin`'s own root page (spec §3a) — checked before the
     canonical taxonomy table. Then the taxonomy table, in its fixed order, matched on `url`'s
-    OWN path segments alone — no title, no label; see `_CANONICAL_TAXONOMY`'s own docstring
-    for why enrichment's partial results make that a correctness requirement, not merely a
-    style choice. Then the fallback: the leading path segment, humanized, with the same two
-    guards `_section_for` has always needed — no usable name humanizes to `_OTHER_SECTION`, and
-    (spec gap 1.5.4) a humanized name that collides with `OPTIONAL_SECTION` ITSELF also becomes
-    `_OTHER_SECTION`, so `/optional/pricing` cannot silently manufacture a second `## Optional`
-    heading that `parse_index` would misattribute.
+    OWN path segments and their hyphen-separated sub-words (`_segment_vocabulary`) — no title,
+    no label; see `_CANONICAL_TAXONOMY`'s own docstring for why enrichment's partial results
+    make that a correctness requirement, not merely a style choice. Then the fallback: the
+    leading path segment, humanized, with the same two guards `_section_for` has always
+    needed — no usable name humanizes to `_OTHER_SECTION`, and (spec gap 1.5.4) a humanized
+    name that collides with `OPTIONAL_SECTION` ITSELF also becomes `_OTHER_SECTION`, so
+    `/optional/pricing` cannot silently manufacture a second `## Optional` heading that
+    `parse_index` would misattribute.
     """
     if _is_origin_root_url(url, origin):
         return "Overview"
-    segments = {segment.lower() for segment in _path_segments(url)}
+    vocabulary = _segment_vocabulary(url)
     for name, url_segments in _CANONICAL_TAXONOMY:
-        if segments & url_segments:
+        if vocabulary & url_segments:
             return name
     return _fallback_section(url)
 
@@ -708,7 +740,12 @@ _ALWAYS_OPTIONAL_URL_SEGMENTS: Final[frozenset[str]] = frozenset(
         "dpa",
         "gdpr",
         "subprocessors",
-        # Vulnerability disclosure / security.txt.
+        # Vulnerability disclosure / security.txt. Bare "vulnerability" catches a real site's
+        # own `/vulnerability-reporting/` (found on step 9's Profound crawl) via
+        # `_segment_vocabulary`'s sub-word split — a compound this list's own
+        # "vulnerability-disclosure" entry, matched only as a whole segment, would otherwise
+        # miss entirely.
+        "vulnerability",
         "vulnerability-disclosure",
         "responsible-disclosure",
         "security.txt",
@@ -770,11 +807,16 @@ def _is_always_optional(url: str) -> bool:
     vocabulary a site's own information architecture already encodes in its URLs — which is
     also, incidentally, the more robust signal: a page's own author cannot accidentally give a
     legal page a title that reads like Overview.
+
+    Matched against `_segment_vocabulary(url)` — whole segments AND their hyphen-separated
+    sub-words — for the identical reason `_section_for` reads the same vocabulary: a real
+    site's own `/vulnerability-reporting/` is exactly the `vulnerability-disclosure` case this
+    list already names, spelled with a hyphen this list's exact-segment form alone would
+    never match.
     """
-    segments = [segment.lower() for segment in _path_segments(url)]
-    if any(segment in _ALWAYS_OPTIONAL_URL_SEGMENTS for segment in segments):
+    if _segment_vocabulary(url) & _ALWAYS_OPTIONAL_URL_SEGMENTS:
         return True
-    return _has_dated_segment(segments)
+    return _has_dated_segment([segment.lower() for segment in _path_segments(url)])
 
 
 # --- ranking (spec §5) ------------------------------------------------------------------------
@@ -943,7 +985,13 @@ def _fingerprint(markdown: str) -> str:
 
 # --- descriptions (spec §6) --------------------------------------------------------------------
 
-_DESCRIPTION_MAX_WORDS: Final = 20
+_DESCRIPTION_MAX_WORDS: Final = 30
+"""The hard cap `_whole_sentence` gates a description's first sentence against. Not a cut
+point — a description's own og:description-shaped sentence is usually well under 20 words,
+and a first sentence in the 20-30 range is still emitted WHOLE rather than trimmed to 20; only
+past 30 does this module give up and drop the description entirely. See `_whole_sentence`'s
+own docstring for why "emit whole or drop" replaced "cut to the nearest word.\""""
+
 _SITE_SENTENCE_MAX_WORDS: Final = 30
 _BOILERPLATE_MIN_PAGES: Final = 3
 """Two pages sharing a description is a two-page site telling the truth; three is a site-wide
@@ -952,7 +1000,17 @@ default `og:description`. Compared on the whitespace- and case-normalized RAW de
 docstring) — detectable only here, because a per-page pass could never see every page at
 once."""
 
-_SENTENCE_END_PATTERN: Final = re.compile(r"[.!?](?:\s|$)")
+_SENTENCE_END_PATTERN: Final = re.compile(r"[.!?](?:\s|$)|[。！？]")
+"""An ASCII terminator (`.`, `!`, `?`) followed by whitespace or the end of the string — the
+trailing-whitespace requirement is what stops "e.g." or "3.14" from reading as a sentence
+boundary — OR a CJK terminator (`。`, `！`, `？`), matched unconditionally: CJK prose does not
+put a space after sentence-ending punctuation, so requiring one would never match a real CJK
+sentence at all. Found necessary on a real site (step 9 follow-up): a description in Japanese,
+Chinese, or Traditional Chinese ending in `。` was going undetected as "has a terminator" and
+falling through to the whole-text branch — safe for a single-sentence description (the common
+case, and the one step 9's four sites happened to produce), but silently wrong the day a
+multi-sentence CJK description needs the same first-sentence trim an English one already
+gets."""
 
 
 def _first_sentence(text: str) -> str:
@@ -962,14 +1020,24 @@ def _first_sentence(text: str) -> str:
     return text[: match.end()].strip() if match else text
 
 
-def _cap_words(text: str, max_words: int) -> str:
-    """`text` cut to at most `max_words` words, at a word boundary — no ellipsis appended, on
-    purpose: this is a deliberate trim of a sentence that is still meant to read as prose, not
-    a truncation the reader needs flagged the way `_clean`'s `MAX_TEXT_CHARS` cut is."""
-    words = text.split()
-    if len(words) <= max_words:
-        return text.strip()
-    return " ".join(words[:max_words])
+def _whole_sentence(text: str, max_words: int) -> str | None:
+    """`text`'s first sentence (`_first_sentence`), emitted WHOLE if it fits within
+    `max_words`, or `None` if it does not — never a word-boundary cut partway through it.
+
+    **Replaces a word-boundary `_cap_words` cut that used to ship a real defect**: cutting a
+    genuine sentence at the Nth word produces a description ending in a dangling word with no
+    terminal punctuation — "…and stay competitive in the" — which is indistinguishable from
+    the SITE's own truncation the ellipsis check in `_describe` already exists to catch, and
+    is a worse reading experience than the truncated-with-`…` originals this module's whole
+    redesign was meant to fix. "Whole sentence or nothing" is the rule for every text field in
+    this module drawn from a site's own prose — `_describe`, `_site_sentence`, and
+    `_prose_paragraph` (via `_whole_paragraph_or_sentence`) all build on this function or its
+    three-tier sibling rather than trimming independently.
+    """
+    sentence = _first_sentence(text)
+    if len(sentence.split()) <= max_words:
+        return sentence
+    return None
 
 
 def _normalize_for_boilerplate(text: str | None) -> str:
@@ -1021,11 +1089,18 @@ def _describe(raw: str | None, label: str, boilerplate: frozenset[str]) -> str |
     it trims at `MAX_TEXT_CHARS` — checking a `_clean`-passed value here would mistake this
     module's own truncation marker for the site's). A description matching `boilerplate` is
     dropped next, on the same raw, normalized text `_boilerplate_descriptions` compared it
-    against. What survives is cut to its first sentence, then to `_DESCRIPTION_MAX_WORDS`, then
-    passed through `_clean` — the hard `MAX_TEXT_CHARS` safety net, IN ADDITION TO this
-    trimming rather than instead of it (see that constant's own docstring). Finally, a
-    description that — after all of the above — merely restates `label` is dropped: a bare
-    link already says as much.
+    against. What survives is emitted as its first sentence, WHOLE, when that sentence fits
+    within `_DESCRIPTION_MAX_WORDS` (`_whole_sentence`) — **never cut at a word boundary
+    partway through it**: an earlier revision of this function trimmed to a fixed word count,
+    which produces a description ending in a dangling word with no terminal punctuation
+    ("…and stay competitive in the"), indistinguishable from the truncated-with-`…` originals
+    this whole redesign exists to fix and arguably worse, since the reader gets no signal at
+    all that anything was cut. A first sentence that overruns the cap is dropped ENTIRELY
+    rather than shortened — a bare link is the clean outcome the llmstxt.org format is built
+    to support, and a mid-clause fragment is not. What survives `_whole_sentence` still passes
+    through `_clean` — the hard `MAX_TEXT_CHARS` safety net, IN ADDITION TO this rule rather
+    than instead of it (see that constant's own docstring) — before a description that merely
+    restates `label` is dropped as the final check: a bare link already says as much.
     """
     if raw is None:
         return None
@@ -1036,8 +1111,10 @@ def _describe(raw: str | None, label: str, boilerplate: frozenset[str]) -> str |
         return None
     if _normalize_for_boilerplate(stripped) in boilerplate:
         return None
-    trimmed = _cap_words(_first_sentence(stripped), _DESCRIPTION_MAX_WORDS)
-    cleaned = _clean(trimmed)
+    sentence = _whole_sentence(stripped, _DESCRIPTION_MAX_WORDS)
+    if sentence is None:
+        return None
+    cleaned = _clean(sentence)
     if cleaned is None:
         return None
     if _restates_label(cleaned, label):
@@ -1081,11 +1158,10 @@ than "starts with `#`": marketing copy genuinely beginning "#1 platform for..." 
 "#trending" is not a heading and must not be skipped as one; `# ` and `## Section` are."""
 
 
-def _first_paragraph(markdown: str) -> str | None:
-    """The first non-empty, whitespace-collapsed, NON-HEADING block of `markdown`, split on
-    blank lines — `_site_sentence`'s second-choice source and `_prose_paragraph`'s only
-    source. `None` for markdown with no such block at all (empty, all-whitespace, or nothing
-    but headings).
+def _paragraph_candidates(markdown: str) -> Iterator[str]:
+    """Every non-empty, whitespace-collapsed, NON-HEADING block of `markdown`, split on blank
+    lines, in document order — `_first_paragraph`'s and `_prose_paragraph`'s shared candidate
+    pool.
 
     **Skips a block that is itself a markdown heading**, found on real sites during step 9's
     verification: `internals/extract.py`'s markdown sometimes keeps a page's own `# Title¶`
@@ -1097,31 +1173,51 @@ def _first_paragraph(markdown: str) -> str | None:
         collapsed = " ".join(block.split())
         if not collapsed or _ATX_HEADING_PATTERN.match(collapsed):
             continue
-        return collapsed
-    return None
+        yield collapsed
+
+
+def _first_paragraph(markdown: str) -> str | None:
+    """The first candidate from `_paragraph_candidates`, or `None` for markdown with none at
+    all (empty, all-whitespace, or nothing but headings) — `_site_sentence`'s second-choice
+    source.
+
+    Deliberately UNQUALIFIED, unlike `_prose_paragraph` below: `_site_sentence` only reaches
+    this when the root page has no `description` at all, and even a short, tagline-shaped
+    block ("Used by the best marketers in the world") is still a more honest blockquote than
+    falling all the way through to the generic page-count sentence one level further down its
+    own fallback chain. `_prose_paragraph`'s free-prose block has no such fallback beneath it
+    — omitting it entirely costs nothing — so it can afford to be pickier; see
+    `_qualifies_as_prose`.
+    """
+    return next(_paragraph_candidates(markdown), None)
 
 
 def _site_sentence(root_page: CrawledPage | None) -> str | None:
     """What the blockquote says about the SITE, rather than about the artifact: the root
-    page's own `description`, first sentence, capped at `_SITE_SENTENCE_MAX_WORDS` — or, when
-    the root page has none usable, the first non-empty paragraph of its `markdown`, same
-    treatment — or `None` when neither exists (no root page fetched, or both fields are empty
-    after cleaning). `None` is a normal, common result, not a failure: `_index_summary`/
+    page's own `description`, first sentence, emitted WHOLE if it fits within
+    `_SITE_SENTENCE_MAX_WORDS` (`_whole_sentence`) — or, when the root page has none usable,
+    its markdown's first paragraph (`_first_paragraph`), same treatment — or `None` when
+    neither exists (no root page fetched, both fields empty after cleaning, or both sentences
+    overran the cap). `None` is a normal, common result, not a failure: `_index_summary`/
     `_full_summary` fall back to a count sentence when this is `None`, and every value
-    returned here has already been through `_clean`'s `MAX_TEXT_CHARS` safety bound."""
+    returned here has already been through `_clean`'s `MAX_TEXT_CHARS` safety bound.
+
+    Never a word-boundary cut partway through the sentence — see `_whole_sentence`'s own
+    docstring for the failure mode this avoids: a blockquote reading "…and stay competitive
+    in the" is a worse outcome than falling through to the next source, or to the count
+    sentence.
+    """
     if root_page is None:
         return None
     if root_page.description:
-        sentence = _cap_words(
-            _first_sentence(root_page.description.strip()), _SITE_SENTENCE_MAX_WORDS
-        )
-        cleaned = _clean(sentence)
+        sentence = _whole_sentence(root_page.description.strip(), _SITE_SENTENCE_MAX_WORDS)
+        cleaned = _clean(sentence) if sentence is not None else None
         if cleaned:
             return cleaned
     paragraph = _first_paragraph(root_page.markdown)
     if paragraph:
-        sentence = _cap_words(_first_sentence(paragraph), _SITE_SENTENCE_MAX_WORDS)
-        cleaned = _clean(sentence)
+        sentence = _whole_sentence(paragraph, _SITE_SENTENCE_MAX_WORDS)
+        cleaned = _clean(sentence) if sentence is not None else None
         if cleaned:
             return cleaned
     return None
@@ -1133,6 +1229,13 @@ prose block is where a reader who wants slightly more before hitting the link se
 it. Still capped, and still through `_clean`'s `MAX_TEXT_CHARS` safety net (see
 `_prose_paragraph`), for the identical adversarial-input reason every other text field in this
 module is bounded."""
+
+_PROSE_MIN_WORDS: Final = 8
+"""The minimum length, in words, a markdown block must clear — IN ADDITION TO containing at
+least one sentence terminator (`_qualifies_as_prose`) — before `_prose_paragraph` will use
+it. A two- or three-word tagline is not "a substantial paragraph" even on the rare occasion
+it happens to end in a period; this is what stops a short, punctuated fragment from
+qualifying just because the terminator check alone let it through."""
 
 _OPTIONAL_ORIENTATION_SENTENCE: Final = (
     "Pages above are grouped by topic and cover what is most useful for understanding this "
@@ -1165,24 +1268,70 @@ def _is_near_identical(a: str, b: str) -> bool:
     return longer.startswith(shorter)
 
 
+def _qualifies_as_prose(text: str) -> bool:
+    """Whether `text` reads as a real, sentence-shaped paragraph rather than hero-strip
+    chrome — at least one sentence terminator (`_SENTENCE_END_PATTERN`) AND at least
+    `_PROSE_MIN_WORDS` words.
+
+    Found on a real site (step 9 follow-up): a homepage's first markdown block is routinely a
+    tagline — "Used by the best marketers in the world" — real text, but not a paragraph, and
+    not what a reader wants standing in for orientation prose. The terminator check alone
+    catches that example; the length check on top of it is what stops a short-but-punctuated
+    fragment ("Sign up today.") from qualifying just because it happens to end in a period.
+    """
+    if not _SENTENCE_END_PATTERN.search(text):
+        return False
+    return len(text.split()) >= _PROSE_MIN_WORDS
+
+
+def _whole_paragraph_or_sentence(text: str, max_words: int) -> str | None:
+    """`text` WHOLE if it fits within `max_words`; failing that, its own first sentence
+    (`_first_sentence`) if THAT fits; `None` if even the first sentence overruns the cap.
+
+    The three-tier sibling of `_whole_sentence` above, for a candidate that is allowed to be
+    more than one sentence long — the free-prose block, unlike a description, is not
+    contractually a single sentence. Every tier still emits a COMPLETE unit or nothing: never
+    a word-boundary cut, which could previously land as easily inside a markdown construct
+    (`…so you can [buy` — a truncated link, missing its own `](url)`) as it could mid-clause.
+    """
+    if len(text.split()) <= max_words:
+        return text
+    sentence = _first_sentence(text)
+    if len(sentence.split()) <= max_words:
+        return sentence
+    return None
+
+
 def _prose_paragraph(root_page: CrawledPage | None, site_sentence: str | None) -> str | None:
-    """The root page's first substantial markdown paragraph, capped at
-    `_PROSE_PARAGRAPH_MAX_WORDS` words — the free-prose block's first possible source
-    (llmstxt.org's own optional element between the blockquote and the first `## ` section).
-    `None` when there is no root page, its markdown has no non-empty paragraph, or the
-    resulting text is near-identical to `site_sentence` (`_is_near_identical`) — the blockquote
-    already said it, and repeating it one paragraph later is noise rather than orientation."""
+    """The root page's first QUALIFYING markdown paragraph — real, sentence-shaped prose
+    (`_qualifies_as_prose`), never hero-strip chrome — emitted whole up to
+    `_PROSE_PARAGRAPH_MAX_WORDS`, or as its own first sentence if the whole paragraph overruns
+    that (`_whole_paragraph_or_sentence`; never a word-boundary fragment of either). `None`
+    when there is no root page, no candidate block qualifies at all, or every qualifying
+    candidate is near-identical to `site_sentence` (`_is_near_identical`) — the blockquote
+    already said it, and repeating it one paragraph later is noise rather than orientation.
+
+    Walks EVERY non-heading block in document order (`_paragraph_candidates`), not only the
+    first: a homepage's first block is routinely a tagline rather than real prose, and moving
+    on to the next block is what finds the actual opening paragraph instead of settling for
+    chrome, or for a word-boundary cut through it, or for omitting the section outright when a
+    perfectly good paragraph was one block further down.
+    """
     if root_page is None:
         return None
-    paragraph = _first_paragraph(root_page.markdown)
-    if paragraph is None:
-        return None
-    cleaned = _clean(_cap_words(paragraph, _PROSE_PARAGRAPH_MAX_WORDS))
-    if not cleaned:
-        return None
-    if site_sentence is not None and _is_near_identical(cleaned, site_sentence):
-        return None
-    return cleaned
+    for candidate in _paragraph_candidates(root_page.markdown):
+        if not _qualifies_as_prose(candidate):
+            continue
+        text = _whole_paragraph_or_sentence(candidate, _PROSE_PARAGRAPH_MAX_WORDS)
+        if text is None:
+            continue
+        cleaned = _clean(text)
+        if not cleaned:
+            continue
+        if site_sentence is not None and _is_near_identical(cleaned, site_sentence):
+            continue
+        return cleaned
+    return None
 
 
 def _prose_block(

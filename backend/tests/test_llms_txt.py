@@ -457,6 +457,53 @@ def test_taxonomy_matching_is_on_any_path_segment_not_only_the_leading_one() -> 
     assert "## Docs" in output
 
 
+def test_taxonomy_matching_reads_hyphenated_sub_words_of_a_compound_segment() -> None:
+    """Found on a real site (step 9 follow-up): a compound, hyphenated slug like
+    `/reports-guides/` never matches this table under EXACT whole-segment matching, even
+    though it is built from the same words the table already looks for — it was landing in
+    `Other` purely because the site spells two taxonomy words as one segment. Still URL-only:
+    this widens WHICH PART of the URL is read, not what field."""
+    pages = [
+        _page("https://example.test/vs-competitor/a", title="A"),
+        _page("https://example.test/vs-competitor/b", title="B"),
+    ]
+    output = generate_llms_txt(pages, site_url=_SITE)
+
+    assert "## Comparisons" in output
+
+
+def test_a_new_url_word_added_for_a_real_site_resolves_to_its_section() -> None:
+    """`enterprise` and `instructions` were added to the taxonomy after step 9 found genuine,
+    generically-applicable gaps (a B2B site's `/enterprise` page, a site's own
+    `/ai-instructions` page) — pinned here so a future edit cannot silently drop either."""
+    pages = [
+        _page("https://example.test/enterprise/a", title="A"),
+        _page("https://example.test/enterprise/b", title="B"),
+    ]
+    assert "## Product" in generate_llms_txt(pages, site_url=_SITE)
+
+    pages = [
+        _page("https://example.test/setup-instructions/a", title="A"),
+        _page("https://example.test/setup-instructions/b", title="B"),
+    ]
+    assert "## Guides" in generate_llms_txt(pages, site_url=_SITE)
+
+
+def test_always_optional_reads_hyphenated_sub_words_of_a_compound_segment() -> None:
+    """The always-Optional rules need the identical sub-word widening for the identical
+    reason: a real site's own `/vulnerability-reporting/` page (found on step 9's Profound
+    crawl) is exactly the case `vulnerability-disclosure` already names, spelled with a
+    hyphen the exact-segment form alone would never catch."""
+    pages = [
+        _page("https://example.test/vulnerability-reporting", title="Report a Vulnerability"),
+        _page("https://example.test/docs/a", title="A"),
+    ]
+    output = generate_llms_txt(pages, site_url=_SITE)
+
+    assert any("Report a Vulnerability" in bullet for bullet in _section_of(output, "Optional"))
+    assert "Report a Vulnerability" not in _main_body(output)
+
+
 def test_taxonomy_matching_reads_only_the_url_never_the_title_or_label() -> None:
     """The enrichment-invariance rule, pinned directly at the unit this table is: a page whose
     TITLE happens to contain a taxonomy keyword must not be pulled into that section on the
@@ -849,6 +896,135 @@ def test_no_prose_block_means_blockquote_goes_straight_to_the_first_heading() ->
     assert lines[4] == "## Docs"
 
 
+def test_the_prose_block_skips_a_tagline_with_no_sentence_terminator() -> None:
+    """Found on a real site: a homepage's first markdown block is routinely a hero-strip
+    tagline ("Used by the best marketers in the world") with no sentence terminator at all —
+    real text, but not a paragraph. `_prose_paragraph` must move on to the next block rather
+    than using it or giving up. A distinct `description` keeps the blockquote's own sourcing
+    out of this test — otherwise the tagline would legitimately surface there instead, via
+    `_site_sentence`'s own (deliberately unqualified) markdown fallback."""
+    tagline = "Used by the best marketers in the world"
+    real_paragraph = "A real opening paragraph with an actual sentence that ends properly."
+    pages = [
+        _page(
+            "https://example.test/",
+            title="Acme",
+            description="A short blockquote sentence, unrelated to the markdown below.",
+            markdown=f"{tagline}\n\n{real_paragraph}",
+        )
+    ]
+    output = generate_llms_txt(pages, site_url=_SITE)
+
+    assert tagline not in output
+    assert real_paragraph in output
+
+
+def test_the_prose_block_skips_a_short_punctuated_fragment_below_the_minimum_length() -> None:
+    """A terminator alone is not enough to qualify — "Sign up today." is a complete sentence
+    and still not a substantial paragraph. A distinct `description` isolates the blockquote's
+    own sourcing from this test, for the same reason the tagline test above needs one."""
+    short_fragment = "Sign up today."
+    real_paragraph = (
+        "A real, complete opening paragraph long enough to qualify as substantial prose."
+    )
+    pages = [
+        _page(
+            "https://example.test/",
+            title="Acme",
+            description="A short blockquote sentence, unrelated to the markdown below.",
+            markdown=f"{short_fragment}\n\n{real_paragraph}",
+        )
+    ]
+    output = generate_llms_txt(pages, site_url=_SITE)
+
+    assert short_fragment not in output
+    assert real_paragraph in output
+
+
+def test_the_prose_block_is_omitted_when_no_candidate_paragraph_qualifies() -> None:
+    pages = [
+        _page(
+            "https://example.test/",
+            title="Acme",
+            markdown="Used by the best marketers in the world\n\nSign up today.\n\nGo",
+        )
+    ]
+    output = generate_llms_txt(pages, site_url=_SITE)
+
+    assert "Sign up today." not in output
+    assert "\nGo\n" not in output
+    _assert_shape_invariant(output, bullets=True)
+
+
+def test_the_prose_block_uses_the_whole_paragraph_when_it_fits() -> None:
+    """A distinct `description` keeps the blockquote from being derived from this same
+    paragraph — otherwise the blockquote's own (shorter) first-sentence summary would read as
+    near-identical to the fuller paragraph and suppress the prose block entirely
+    (`_is_near_identical`), which is correct behaviour but not what this test is about."""
+    paragraph = "First sentence here. Second sentence follows naturally after it."
+    pages = [
+        _page(
+            "https://example.test/",
+            title="Acme",
+            description="A short blockquote sentence, unrelated to the markdown below.",
+            markdown=paragraph,
+        )
+    ]
+    output = generate_llms_txt(pages, site_url=_SITE)
+
+    assert paragraph in output
+
+
+def test_the_prose_block_falls_back_to_the_paragraphs_first_sentence_past_the_cap() -> None:
+    """The three-tier rule: the whole paragraph is used only if it fits; otherwise its own
+    first sentence, whole, never a word-boundary cut into the sentence that follows it. A
+    distinct `description` keeps this test about the PROSE BLOCK specifically — without one,
+    the blockquote's own fallback would independently pick up this same first sentence and
+    make the prose block's own contribution ambiguous (near-identical suppression, correct
+    behaviour, just not what this test means to isolate)."""
+    first_sentence = "This is a short opening sentence that easily clears the qualifying bar."
+    long_tail = " ".join(f"trailing{index}" for index in range(70))
+    paragraph = f"{first_sentence} {long_tail}."
+    pages = [
+        _page(
+            "https://example.test/",
+            title="Acme",
+            description="A short blockquote sentence, unrelated to the markdown below.",
+            markdown=paragraph,
+        )
+    ]
+    output = generate_llms_txt(pages, site_url=_SITE)
+
+    assert first_sentence in output
+    assert "trailing0" not in output
+
+
+def test_the_prose_block_never_truncates_inside_a_markdown_construct() -> None:
+    """The unambiguous failure found on a real, small site: a naive word-boundary cut landed
+    inside `[text](url)`, leaving a dangling, unterminated bracket in a document meant to be
+    parsed ("…so you can [buy"). Constructed so the OLD word-boundary cut at the paragraph's
+    word cap would have landed exactly on the opening `[` of a markdown link — the fix either
+    emits the whole paragraph/sentence or omits it and moves on to the next candidate, never a
+    fragment with an unbalanced construct."""
+    filler = " ".join(f"filler{index}" for index in range(59))
+    broken_candidate = (
+        f"{filler} [buy expired domains](https://example.test/buy) today, right now, immediately."
+    )
+    good_candidate = "A real, complete opening paragraph that easily clears the qualifying bar."
+    pages = [
+        _page(
+            "https://example.test/",
+            title="Acme",
+            markdown=f"{broken_candidate}\n\n{good_candidate}",
+        )
+    ]
+    output = generate_llms_txt(pages, site_url=_SITE)
+
+    assert "[buy" not in output
+    assert good_candidate in output
+    _assert_shape_invariant(output, bullets=True)
+
+
 # --- dedup -------------------------------------------------------------------------------------
 
 
@@ -913,14 +1089,127 @@ def test_a_description_is_cut_to_its_first_sentence() -> None:
     assert "Second sentence" not in output
 
 
-def test_a_description_is_capped_at_roughly_twenty_words() -> None:
-    words = " ".join(f"word{i}" for i in range(40))
+def test_a_short_description_is_emitted_whole_with_its_own_punctuation_intact() -> None:
+    pages = [
+        _page(
+            "https://example.test/docs/a",
+            title="A",
+            description="A short, honest sentence about this page.",
+        )
+    ]
+    output = generate_llms_txt(pages, site_url=_SITE)
+    bullet = _bullets(output)[0]
+
+    assert bullet.split(": ", 1)[1] == "A short, honest sentence about this page."
+
+
+def test_a_description_between_the_target_and_the_hard_cap_is_emitted_whole() -> None:
+    """The "still reasonable as one line" tier: a first sentence that overruns the ~20-word
+    target but fits within `_DESCRIPTION_MAX_WORDS` (30) is emitted WHOLE — never trimmed to
+    20, which is exactly the old defect: a description ending in a dangling word with no
+    terminal punctuation, indistinguishable from a truncated original."""
+    words = " ".join(f"word{i}" for i in range(25)) + "."
     pages = [_page("https://example.test/docs/a", title="A", description=words)]
     output = generate_llms_txt(pages, site_url=_SITE)
     bullet = _bullets(output)[0]
 
     description = bullet.split(": ", 1)[1]
-    assert len(description.split()) <= 20
+    assert description == words
+    assert len(description.split()) == 25
+    assert description.endswith(".")
+
+
+def test_a_description_whose_first_sentence_overruns_the_hard_cap_is_dropped_entirely() -> None:
+    """Never a word-boundary fragment: when the first sentence itself is longer than
+    `_DESCRIPTION_MAX_WORDS`, the whole description is dropped and the bullet is a bare link
+    — the clean outcome the llmstxt.org format is built to support, and strictly better than
+    a description that ends mid-clause with no signal anything was cut."""
+    words = " ".join(f"word{i}" for i in range(40))
+    pages = [_page("https://example.test/docs/a", title="A", description=words)]
+    output = generate_llms_txt(pages, site_url=_SITE)
+
+    assert "- [A](https://example.test/docs/a)\n" in output
+    assert ": " not in _bullets(output)[0]
+
+
+def test_a_multi_sentence_description_over_the_cap_falls_back_to_its_first_sentence() -> None:
+    """A first sentence that fits, followed by more text that would not — the ordinary case
+    a real meta description produces. The description is exactly the first sentence, whole,
+    never a word-boundary cut into the second one."""
+    description = "This is a short opening sentence. " + " ".join(f"trailing{i}" for i in range(40))
+    pages = [_page("https://example.test/docs/a", title="A", description=description)]
+    output = generate_llms_txt(pages, site_url=_SITE)
+    bullet = _bullets(output)[0]
+
+    assert bullet.split(": ", 1)[1] == "This is a short opening sentence."
+
+
+def test_a_cjk_description_stops_at_its_own_full_stop_not_the_whole_blob() -> None:
+    """Found on a real site (step 9 follow-up): CJK prose does not put a space after its own
+    sentence-ending punctuation (`。`), so the ASCII-only pattern never recognised one at all
+    and a multi-sentence CJK description would have fallen through to "no terminator found,
+    return everything" instead of stopping at its own first sentence."""
+    description = "技術的な深掘り、製品のアップデート。これは二番目の文です、十分に長くなるように追加しています。"
+    pages = [_page("https://example.test/docs/a", title="A", description=description)]
+    output = generate_llms_txt(pages, site_url=_SITE)
+    bullet = _bullets(output)[0]
+
+    assert bullet.split(": ", 1)[1] == "技術的な深掘り、製品のアップデート。"
+
+
+def test_no_emitted_bullet_description_is_a_mid_sentence_fragment() -> None:
+    """The regression, measured the same way it was found: on real sites, roughly 28% of
+    bullet descriptions ended with no terminal punctuation — cut mid-clause by the old
+    word-boundary trim. Every description this module emits must now end in terminal
+    punctuation (a real sentence, however the site itself chose to punctuate it) UNLESS it is
+    the source's own complete, untouched text — which this synthetic battery cannot produce,
+    because `_page`'s own fixture descriptions always end in a period. A single-word
+    "sentence" is the one legitimate exception (`_first_sentence` finds no terminator and
+    returns it whole, unmodified) and is excluded below by construction, not by exemption.
+    """
+    long_word_sentence = " ".join(f"{'x' * 40}{i}" for i in range(20)) + "."
+    descriptions = [
+        "A short, complete sentence about this page.",
+        " ".join(f"word{i}" for i in range(19)) + ".",  # just under the target
+        " ".join(f"word{i}" for i in range(20)) + ".",  # exactly the target
+        " ".join(f"word{i}" for i in range(25)) + ".",  # between target and hard cap
+        " ".join(f"word{i}" for i in range(30)) + ".",  # exactly the hard cap
+        "First sentence is short. " + " ".join(f"w{i}" for i in range(50)),  # long trailer
+        long_word_sentence,  # long WORDS, short word count
+    ]
+    pages = [
+        _page(f"https://example.test/docs/{index:02d}", title=f"P{index}", description=text)
+        for index, text in enumerate(descriptions)
+    ]
+    output = generate_llms_txt(pages, site_url=_SITE)
+
+    fragments = [
+        bullet
+        for bullet in _bullets(output)
+        if ": " in bullet and not bullet.rstrip().endswith((".", "!", "?", "\u2026"))
+    ]
+    assert fragments == []
+
+    # And every description that DID survive is exactly its source's own first sentence — not
+    # a coincidence of this particular battery having short descriptions, but the actual
+    # invariant: nothing here was cut at a word boundary. Matched by URL, not position, since
+    # rank order (not input order) decides where a bullet lands.
+    bullet_by_url = {
+        match.group(1): bullet
+        for bullet in _bullets(output)
+        if (match := re.match(r"^- \[.*?\]\((\S+?)\)", bullet))
+    }
+    for index, source in enumerate(descriptions):
+        url = f"https://example.test/docs/{index:02d}"
+        bullet = bullet_by_url[url]
+        if ": " not in bullet:
+            continue
+        emitted = bullet.split(": ", 1)[1]
+        # Through `_clean` too, not raw `_first_sentence` — a sentence within the word cap
+        # can still exceed `MAX_TEXT_CHARS` (the `long_word_sentence` case above), and
+        # `_clean`'s own safety-net cut is expected there, not a fragment this test should
+        # flag; that cut is what appends the ellipsis `fragments` above already tolerates.
+        assert emitted == llms_txt._clean(llms_txt._first_sentence(source.strip()))
 
 
 def test_a_description_already_ending_in_an_ellipsis_is_dropped_entirely() -> None:
@@ -944,15 +1233,25 @@ def test_a_description_ending_in_three_dots_is_also_dropped() -> None:
     assert "- [A](https://example.test/docs/a)\n" in output
 
 
-def test_clean_own_ellipsis_is_not_mistaken_for_the_sites(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_clean_own_ellipsis_is_not_mistaken_for_the_sites() -> None:
     """Spec gap 1.5.3: the ellipsis check must run on the RAW description, before `_clean`'s
-    own 500-char cut appends its own `…` — otherwise every long, honest description would be
-    dropped as if the site had truncated it itself."""
-    long_description = "word " * 200
-    pages = [_page("https://example.test/docs/a", title="A", description=long_description)]
+    own 500-char cut appends its own `…` — otherwise a genuinely long single sentence would be
+    dropped as if the site had truncated it itself.
+
+    Built from a handful of very long WORDS, not many short ones, so the sentence clears
+    `_clean`'s 500-character safety net while staying at 20 words — comfortably under
+    `_DESCRIPTION_MAX_WORDS` — which is what actually exercises `_clean`'s own cut rather than
+    the (separate, more common) word-count drop `_whole_sentence` applies first."""
+    long_word = "x" * 40
+    long_sentence = " ".join(f"{long_word}{index}" for index in range(20)) + "."
+    assert len(long_sentence) > MAX_TEXT_CHARS
+    assert len(long_sentence.split()) <= 30
+
+    pages = [_page("https://example.test/docs/a", title="A", description=long_sentence)]
     output = generate_llms_txt(pages, site_url=_SITE)
 
     assert "- [A](https://example.test/docs/a):" in output
+    assert "…" in output
 
 
 def test_a_description_that_merely_restates_the_label_is_dropped() -> None:
