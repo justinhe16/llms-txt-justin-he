@@ -13,7 +13,7 @@
 # `app` group undeclared, and flyctl destroys machines whose group no longer exists in the
 # config: the first deploy after this change would tear down the running fleet and build a
 # new one instead of rolling it. Keeping `app` makes that deploy an ordinary rolling
-# update. It also matches `fly scale count app=1` in README.md "Rolling back". This is a
+# update. It also matches `fly scale count app=1` in ARCHITECTURE.md §7.1. This is a
 # permanent choice, not a deferral — a rename would cost the same destroy/recreate later,
 # with more traffic to lose. ARCHITECTURE.md §1 and §7 were updated to match.
 #
@@ -74,7 +74,7 @@ kill_timeout = "240s"
   dockerfile = "Dockerfile"
 
 # NON-SECRET CONFIGURATION ONLY. Every credential is a Fly secret, set out of band and
-# listed in README.md "Where each credential lives". Never add one here: this repository is
+# listed in ARCHITECTURE.md §9.6. Never add one here: this repository is
 # public and its history is permanent (ARCHITECTURE.md §9).
 [env]
   ENVIRONMENT = "production"
