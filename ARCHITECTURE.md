@@ -758,6 +758,23 @@ calling an API — and `anthropic_client.py` sits at the top of the feature, bes
 gives: `app/worker/settings.py` has to import it to build the shared client, and `internals/`
 is private to this feature (§3.1).
 
+**A request describes the page, not just its body.** Each page's user turn carries its URL, the
+title and description the page published about itself, and then its extracted content — in that
+order, with only the content subject to `crawl_enrich_max_chars`. This is a correction, not a
+flourish: the prompt asks for a title "of the entire page based on ALL the content", and a
+request that carries the body alone is not carrying all of it. On a page whose extracted body is
+site-wide chrome — because its real content is a link grid the crawler correctly discards as
+navigation — the model has nothing else to describe and describes the chrome.
+`www.wikipedia.org` is the page that proved it: extraction produced the title "Wikipedia, the
+free encyclopedia" and the real meta description, the model was shown neither, and the run
+shipped an artifact titled "Wikipedia Donation Appeal" off the CentralNotice fundraiser. The
+model-assisted layer produced a worse artifact than the deterministic path it degrades to, which
+is the one outcome this feature must not have. The instruction that says how to weigh the two
+sources is a SECOND system block appended after the pinned Firecrawl prompt rather than an edit
+to it (`_CONTEXT_GUIDANCE`), so "pinned verbatim" stays checkable in a diff. Nothing about the
+seam moved: `apply_summaries` still only replaces a page's `title` and `description`, and
+selection still cannot see either (§3.4, CLAUDE.md #9).
+
 **PER-194 split the gate: `Settings.crawl_enrich_with_llm` is now the DEPLOYMENT half, and
 `websites.enrich_with_llm` (§6.4) is the WEBSITE half — a run enriches only when both are
 true.** `internals/enrich.py` above is unchanged by this ticket; the two-level check and the
