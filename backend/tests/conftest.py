@@ -975,14 +975,18 @@ class FakeAnthropic:
 
     `respond` decides what one call returns, or raises, as a callable over the exact kwargs
     `create()` received — a test varies behavior per page by giving each page distinguishable
-    markdown and pattern-matching on `kwargs["messages"][0]["content"]`, since the page's URL
-    itself never reaches `messages.create` (only its truncated text does). Defaults to always
-    answering with the same fixed, well-formed summary, which is enough for a test that only
-    needs a client to be present and does not care what any individual page's summary says.
+    markdown and pattern-matching on `kwargs["messages"][0]["content"]`. Match with `in`, never
+    with `==`: that turn carries the page's URL and its own extracted title and description
+    ahead of the body (`internals/enrich.py`'s `_render_page`), so a page's markdown is one part
+    of the text rather than the whole of it. Defaults to always answering with the same fixed,
+    well-formed summary, which is enough for a test that only needs a client to be present and
+    does not care what any individual page's summary says.
 
     `calls` records every kwargs dict `create()` was actually called with, in order — for
     assertions on the pinned model, prompt, temperature, and `output_config` shape, and on
-    truncation (`len(calls[i]["messages"][0]["content"])`).
+    truncation. Note `crawl_enrich_max_chars` bounds the BODY, not the turn, so a truncation
+    assertion has to measure the part after the `Extracted page content:` marker rather than
+    `len(calls[i]["messages"][0]["content"])`.
 
     `peak_concurrency` is a real measurement, not an assumption: `create()` increments a
     depth counter, awaits `asyncio.sleep(0)` — a genuine suspension point, the same reason

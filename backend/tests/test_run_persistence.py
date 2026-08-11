@@ -1512,7 +1512,10 @@ async def test_a_per_page_enrichment_failure_mixes_model_and_extracted_titles(
     _mock_crawl_site(monkeypatch, crawl_result)
 
     def respond(kwargs: dict[str, Any]) -> FakeAnthropicResponse:
-        if kwargs["messages"][0]["content"] == failing_page.markdown:
+        # Substring, not equality: a request's user turn carries the page's URL and its own
+        # extracted metadata as well as the body it is asking about (`internals/enrich.py`'s
+        # `_render_page`), so the body is one part of that text rather than all of it.
+        if failing_page.markdown in kwargs["messages"][0]["content"]:
             raise anthropic.APIConnectionError(
                 message="down",
                 request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"),
