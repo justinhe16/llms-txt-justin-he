@@ -7,6 +7,16 @@ const nextConfig: NextConfig = {
   // extending it, and omitting them would unroute every other page in the app.
   pageExtensions: ["ts", "tsx", "md", "mdx"],
 
+  // /presentation is a single self-contained deck living at
+  // public/presentation.html — no React, no Tailwind, no imports, so it can be
+  // opened straight off disk or emailed as one file. Next serves public/ files
+  // at their literal path, so this rewrite is what drops the extension; the
+  // .html URL keeps working and both are public (middleware.ts gates only
+  // /crawls).
+  async rewrites() {
+    return [{ source: "/presentation", destination: "/presentation.html" }];
+  },
+
   images: {
     // GitHub avatars surfaced from user_metadata.avatar_url
     // (lib/auth/use-user.ts) and rendered via next/image in
