@@ -43,7 +43,8 @@ port = 54324
 enabled = true
 file_size_limit = "50MiB"
 
-# Mirrors the private production bucket (README.md "Infrastructure" — Supabase row).
+# Mirrors the private production bucket (ARCHITECTURE.md §1.1 — Supabase row; §3.7 covers why
+# production's copy is a manual bootstrap and this one is not).
 [storage.buckets.crawl-payloads]
 public = false
 

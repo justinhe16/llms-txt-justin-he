@@ -82,6 +82,21 @@ therefore happens outside any transaction.
 | Postgres / Auth / Storage | Supabase | — | Backend talks to Postgres over **asyncpg** |
 | Job queue | Redis (Upstash) | — | Required by ARQ; `rediss://` in production, plain `redis://` locally |
 
+### 1.1 Provisioned infrastructure
+
+One production environment, no staging. Everything below exists and is in use; nothing here is
+aspirational.
+
+| Service | Resource | Purpose |
+| --- | --- | --- |
+| Supabase | `iulfhmykutevtrgcaiec` · us-west-1 | Postgres, GitHub OAuth, private `crawl-payloads` bucket |
+| Upstash | `llms-txt-prod` · us-west-1 | Redis backing the ARQ job queue |
+| Fly.io | `llms-text-justin-he` · org `personal` | FastAPI API + ARQ worker, one image, two process groups |
+| Vercel | `llms-text-justin-he` · scope `justinhe16s-projects` | Next.js frontend, root directory `frontend/` |
+
+None of these is a secret — they are resource names, not credentials. The credentials that reach
+them are enumerated in §9.6, and none of those lives in this repository.
+
 **On the name `app`.** The two Fly process groups are `app` and `worker`, declared in
 [`backend/fly.toml`](./backend/fly.toml). Earlier revisions of this document called the
 first one `web`, which read better but was never what production ran: a fly.toml with no
@@ -913,6 +928,13 @@ for the same reason it is documented in `internals/payload.py`: it is what would
 everything a website ever produced" a single prefix-delete operation, the day that operation
 exists (§11 records that it does not yet).
 
+**In production, nothing provisions the bucket, and that is a manual bootstrap step.** Locally
+`supabase/config.toml` declares it, so `make dev` creates it and a developer never thinks about
+it. On a new Supabase project it has to be created by hand, once: dashboard → Storage → New
+bucket → `crawl-payloads` → **Public: off**. Until it exists, every run fails its upload and ends
+`failed` with a sanitized error — so verify the bucket exists before reading a wave of failed runs
+as a code problem. The failure is honest but its cause is several layers away from its message.
+
 ### 3.8 Logging and correlation ids
 
 **`fly logs` is the entire observability story, and that is a decision rather than a gap.**
@@ -1028,6 +1050,87 @@ for facts about crawled sites; an installation is a fact about a person's GitHub
 a caller "that installation exists but is not yours" would leak which accounts other users have
 connected. `publish_targets` and `publications` are read unscoped like everything else, because they
 describe a website. See `internals/publish_reader.py`'s own docstring.
+
+#### 3.9.1 Enabling it — registering the GitHub App
+
+Optional and **off by default**. `GITHUB_PUBLISH_ENABLED` gates the whole feature; with it
+`false` nothing is read and nothing is required at boot, and CI runs that way deliberately.
+Turning it on takes one manual step nothing in this repo can do for you — registering a GitHub
+App.
+
+**1. Register the App.** GitHub → Settings → Developer settings → **GitHub Apps** → New GitHub App.
+
+| Field | Value |
+| --- | --- |
+| Homepage URL | `https://llms-text-justin-he-gamma.vercel.app` |
+| Setup URL | greyed out — see below |
+| Callback URL | `https://llms-text-justin-he-gamma.vercel.app/api/github/callback` |
+| Request user authorization (OAuth) during installation | on |
+| Redirect on update | off — see below, it's a no-op in this configuration |
+| Webhook | **off** — nothing here listens for one |
+
+**Repository permissions — exactly two**, and no account permissions at all: **Contents: Read and
+write** (the commit) and **Pull requests: Read and write** (the default `pull_request` mode).
+Every extra permission is a reason for a user to decline the install.
+
+**Setup URL vs. Callback URL, and why only one field is set.** GitHub distinguishes the two: the
+setup URL is where an install lands (and, if **Redirect on update** is on, where a later change
+to granted repositories lands too), the callback URL is where an *authorization* lands. Turning
+on "Request user authorization (OAuth) during installation" folds the two into one flow — GitHub's
+own [App-registration docs](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app)
+say the toggle means "you will not be able to enter a URL here," and every post-install redirect
+goes to the Callback URL instead, with a `code` appended. That is why this table sets only the
+Callback URL: with the toggle on, the Setup URL field cannot be set at all — and the same docs say
+**Redirect on update** "will be ignored" whenever Setup URL is blank, so checking it here would do
+nothing. In this exact configuration, a user who revisits GitHub to change which repositories are
+granted lands on GitHub's own installation-settings page, not back on the Publish tab, and there
+is currently no way to change that while the OAuth toggle stays on.
+
+If the toggle is ever turned off, set the Setup URL to the same `/api/github/callback` address —
+the route reads only `installation_id`, `setup_action`, and `state`, none of which depend on how
+the user arrived, so it works unchanged either way. That also makes **Redirect on update** live:
+turn it on and GitHub will send the user back through that same Setup URL after they add or remove
+a repository from an existing installation, not only after the initial install. They land on
+`/crawls` rather than on a site's Publish tab, though, and that is not a gap to close here: `state`
+is attached by the install link in `ConnectPrompt`, which only renders while the account has no
+installation at all. A user editing an existing installation's repository access gets there through
+GitHub's own settings page, which has no `state` to echo back — so `githubCallbackPath` sees none
+and falls back to the list, exactly as it is designed to.
+
+**The `code` this route never reads is a known gap, not an oversight.**
+`PublishService.connect_installation` verifies the installation id against GitHub with this
+deployment's own App credential before writing a row, which is what makes a hand-typed
+`?installation_id=` a `400` rather than a silent forgery. That proves the installation *exists*;
+it does not prove it belongs to the person the row is being recorded for. Exchanging the
+`code` GitHub appends for a user access token and confirming the installation appears in that
+user's own `GET /user/installations` is what would prove ownership — which is why the OAuth
+toggle stays on even though nothing here reads the `code` yet. Flagged as a follow-up, not
+implemented: exchanging that `code` needs its own ticket, not a line added to this one.
+
+**2. Generate a private key** at the bottom of the App's settings page. It downloads a `.pem`.
+
+**3. Set the secrets.** Never commit the key, paste it into a PR or issue, or echo it in a script
+(§9). It mints tokens that can **write to a user's repository**, so a leak is a supply-chain
+problem — if exposed, revoking it and generating a new one is mandatory (§9.5).
+
+```bash
+fly secrets set GITHUB_PUBLISH_ENABLED=true -a llms-text-justin-he
+fly secrets set GITHUB_APP_ID=<the numeric id> -a llms-text-justin-he
+fly secrets set GITHUB_APP_SLUG=<the-app-slug> -a llms-text-justin-he
+fly secrets set GITHUB_APP_PRIVATE_KEY="$(cat ~/Downloads/<your-app>.private-key.pem)" -a llms-text-justin-he
+```
+
+Then set `NEXT_PUBLIC_GITHUB_APP_SLUG` to the same slug in Vercel, so the browser can build the
+install link.
+
+**What a user then does:** a site's **Publish** tab → **Connect a GitHub repository** → grant
+repositories on GitHub → GitHub returns them to that site's **Publish** tab with a confirmation
+→ pick a repository, branch and path → turn on **Publish on every successful run**. A run whose
+`llms.txt` differs from what the repository has opens a pull request; a run that finds no change
+writes nothing and records `No change to publish`.
+
+**Local development:** leave `GITHUB_PUBLISH_ENABLED=false`. Publishing needs a registered App and
+a public callback URL, so it is not part of the local loop.
 
 ---
 
@@ -1431,10 +1534,45 @@ serves every read without Redis, because it only ever enqueues. A deploy gate th
 contradicted that would fail a release of a perfectly healthy API over a queue the API does
 not need in order to serve.
 
-This policy is restated in [`README.md`](./README.md#deploy-policy) so that it is visible to
-anyone who reads only the README. **This section is the authoritative copy.** If the two ever
-disagree, this one governs, and the README must be corrected to match. A deploy rule must
-never exist only in the README.
+### 7.1 Reading a failure
+
+A commit touching `backend/**` or `db/**` runs
+[`deploy-backend.yml`](./.github/workflows/deploy-backend.yml) as three gated jobs. What each
+failure means for the state of production is not symmetric, and the asymmetry is the useful part:
+
+| Job | What it does | What a failure means |
+| --- | --- | --- |
+| `migrate` | `prisma migrate deploy`, on a GitHub runner because the backend image is Python-only | **Nothing deployed.** Old code on the old schema — consistent, and the safest place to fail. Fix the migration and merge again. |
+| `deploy` | `flyctl deploy --remote-only` from `backend/` | **The schema has already moved**: old code on the new schema. Survivable because migrations here are additive (§6.3), but not a resting place. Fix forward. |
+| `smoke` | `curl`s `/health` and reads the **body** — `db` must be `"ok"`, an unhealthy `redis` only warns | Live but cannot reach Postgres. `fly logs --app llms-text-justin-he`. |
+
+The `worker` has no health check, because it has no HTTP listener — one that dies on startup is
+quiet and nothing goes red. After any config change:
+`fly logs --app llms-text-justin-he --process worker`.
+
+Vercel builds and deploys `frontend/` from its own git integration, outside this pipeline.
+
+**Rolling back** follows the prohibitions above: revert the commit on `main` and let the pipeline
+deploy the revert. Redeploying the previous image is break-glass — it buys availability while you
+prepare that revert:
+
+```bash
+fly releases --app llms-text-justin-he                        # find the previous image
+fly deploy --image <previous-image> --app llms-text-justin-he
+fly scale count app=1 worker=1 --app llms-text-justin-he      # if a process group has no machines
+```
+
+### 7.2 Two things that will trip you up
+
+- **The Vercel CLI defaults to the `dori` scope on this machine.** Every `vercel` command needs
+  `--scope justinhe16s-projects`, or you will modify the wrong team.
+- **Fly secrets read `Staged` until the first deploy.** Expected — set with `--stage` when the app
+  had no machines. CI's first deploy applies them.
+
+**This section is the authoritative copy of the deploy policy, and now the only one.**
+[`README.md`](./README.md) used to restate it for anyone who read only the README; it now points
+here instead, because two copies of a prohibition is one copy that can quietly go stale. A deploy
+rule lives here or nowhere.
 
 ---
 
@@ -1828,6 +1966,58 @@ and neither is force-pushing, rewriting history, or deleting the branch. The ord
 
 Rewriting history is optional cleanup after rotation. It is never a substitute for it.
 
+### 9.6 Where each credential lives
+
+No credential is stored in this repo, and none belongs in a PR, an issue, a review comment, or a
+log line (§9.4). Each lives in exactly one place, and this table is the index of which.
+
+| Name | Stored in | Where it comes from |
+| --- | --- | --- |
+| `DATABASE_URL` | Fly secrets | Supabase → Settings → Database → **Session pooler** |
+| `REDIS_URL` | Fly secrets | `upstash redis get --db-id <id>` |
+| `SUPABASE_URL` | Fly secrets, Vercel env | Supabase → Settings → API → Project URL |
+| `SUPABASE_SECRET_KEY` | Fly secrets | Supabase → Settings → API → secret key |
+| `ANTHROPIC_API_KEY` | Fly secrets | Anthropic Console → API keys. Required **only** when `CRAWL_ENRICH_WITH_LLM` is on |
+| `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Vercel env | Supabase → Settings → API → publishable key |
+| `API_URL` | Vercel env | `https://llms-text-justin-he.fly.dev` — server-only, never `NEXT_PUBLIC_` |
+| `FLY_API_TOKEN` | GitHub Actions secrets | `fly tokens create deploy -a llms-text-justin-he`, scoped to this app alone |
+| `DIRECT_DATABASE_URL` | GitHub Actions secrets | The same string as `DATABASE_URL` |
+| `GITHUB_APP_ID` | Fly secrets | The App's settings page. Not a secret, but set alongside the key |
+| `GITHUB_APP_PRIVATE_KEY` | Fly secrets | The App's settings page → **Generate a private key**. Required only when `GITHUB_PUBLISH_ENABLED` is on (§3.9.1) |
+| `GITHUB_APP_SLUG` | Fly secrets | The last path segment of the App's public URL |
+| `NEXT_PUBLIC_GITHUB_APP_SLUG` | Vercel env | The same slug. Public by construction |
+
+**`DATABASE_URL` must be the session pooler on port 5432.** Not the direct connection, which is
+IPv6-only and therefore unreachable from GitHub runners, and not port 6543 — transaction mode
+breaks asyncpg's prepared statements. This is the single most expensive line in the table to get
+wrong, because both wrong answers fail somewhere other than where they were configured.
+
+**`CRAWL_ENRICH_WITH_LLM` defaults off and is not set in CI or production.** Turning it on
+requires BOTH it and the key: the key alone does nothing (`CrawlService` never reads it unless the
+flag is on), and the flag alone refuses to boot (`Settings.validate_required_secrets`). Note that
+this is only the deployment's half of the gate — §11 and `websites.enrich_with_llm` carry the
+per-site half.
+
+### 9.7 Routine rotation
+
+§9.5 covers rotation after an exposure, which is mandatory. This is the same operation performed
+on purpose:
+
+- **Supabase keys** — regenerate in the dashboard, then update Fly secrets and Vercel env
+- **Redis** — `upstash redis reset-password --db-id <id>`, then re-set `REDIS_URL`
+- **GitHub App private key** — generate a new one, set `GITHUB_APP_PRIVATE_KEY`, then delete the old key on GitHub. Both are valid until you delete the old one, so publishing never breaks mid-rotation
+- **Fly token** — `fly tokens revoke <id>`, re-create, `gh secret set FLY_API_TOKEN`
+- **Anthropic key** — revoke in the console, create a replacement, `fly secrets set`
+
+Pipe the value straight through so it never lands in a file or your shell history — §9.4 is not
+satisfied by deleting the file afterwards:
+
+```bash
+upstash redis get --db-id <id> \
+  | jq -r '"rediss://default:\(.password)@\(.endpoint):\(.port)"' \
+  | xargs -I{} fly secrets set REDIS_URL={} --app llms-text-justin-he
+```
+
 ---
 
 ## 10. Naming conventions
@@ -2000,6 +2190,16 @@ Deliberately not decided here, and not to be decided by accident in an implement
   own design for how it authenticates to Storage and how it is triggered — this milestone
   only establishes the layout (`{website_id}/{run_id}.jsonl.gz`) that makes either one cheap
   to write later.
+
+- **Upgrading past the frontend's open dependency advisories.** `npm audit` reports high-severity
+  advisories against `sharp` and `postcss`, and both reach production: they are transitive
+  dependencies of `next`, which is a runtime dependency, not a dev one. The only upgrade npm
+  offers is `next@16`, a breaking major, so this milestone ships on `next@15` knowingly rather
+  than taking a framework major as a drive-by. Two things follow, and the second is the one worth
+  writing down: the README's troubleshooting entry says so plainly instead of waving the findings
+  off as dev-only, and a future ticket that does the bump owns re-verifying the App Router
+  surface, not just the version string. The remaining advisories — `vitest`, and `js-yaml` via
+  `@redocly/openapi-core` — are genuinely dev-only and reach nothing that ships.
 
 If you need one of these to finish a ticket, that is a signal to open a ticket, not to
 invent an answer inline.
