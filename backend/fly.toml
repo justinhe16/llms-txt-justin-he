@@ -127,10 +127,30 @@ kill_timeout = "240s"
 # pool sits close enough to that ceiling that the first deploy could OOM, and an OOM here
 # looks like a failing smoke check rather than like a memory problem.
 #
-# No `processes` key, so this deliberately covers BOTH groups. The worker runs the same
-# image with the same asyncpg pool and at most `max_jobs = 2` concurrent jobs, so it has no
-# reason to be sized differently today. Split this into two `[[vm]]` blocks when the crawl
-# task makes the worker's memory profile genuinely different from the API's — not before.
+# TWO BLOCKS, ONE PER PROCESS GROUP. This was a single `[[vm]]` carrying no `processes` key,
+# deliberately covering both groups, and the comment here said to split it "when the crawl
+# task makes the worker's memory profile genuinely different from the API's — not before."
+# That is now the case, so it is split.
+#
+# The API stays at 512MB. It holds an asyncpg pool and serves JSON; nothing about a busier
+# deployment changes its per-request footprint.
+#
+# The worker gets 1GB because its footprint scales with what a crawl holds, not with how many
+# requests arrive. `max_jobs = 2` (app/worker/policy.py) puts two runs on one machine, and
+# each may fetch `crawl_max_bytes` (50 MiB) of content plus the parsed structures extracted
+# from it — roughly 100 MiB of page content before Python's own overhead. At 512MB that is
+# comfortable while the second slot is usually idle and a coin-flip once it is not, and an
+# OOM mid-crawl surfaces as a run that failed for no stated reason rather than as a memory
+# problem. 1GB buys the margin for the second slot.
+#
+# `size` stays `shared-cpu-1x` on both: a crawl is I/O-bound on network fetches, so CPU is
+# not the constraint that shows up first here.
 [[vm]]
+  processes = ["app"]
   size = "shared-cpu-1x"
   memory = "512mb"
+
+[[vm]]
+  processes = ["worker"]
+  size = "shared-cpu-1x"
+  memory = "1gb"
