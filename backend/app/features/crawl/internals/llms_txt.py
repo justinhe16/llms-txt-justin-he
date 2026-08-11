@@ -119,15 +119,29 @@ target: every run, on any site, should read like a good hand-written index — a
 orientation, then links — not merely a technically valid document.
 
 **The prose block.** llmstxt.org's own format is H1, blockquote, then ZERO OR MORE markdown
-blocks of any kind except a heading, then the `## ` sections — this module used only the first
-two elements of that shape until this addition. `_prose_block` supplies up to two: the root
-page's own first substantial paragraph, when it exists and is not near-identical to the
-blockquote sentence (`_prose_paragraph`; sites routinely lift `og:description` from their own
-hero copy, so the two are the same text more often than not), and — only on a run whose index
-actually has an `## Optional` section — one fixed sentence naming the main-body/Optional
-convention (`_OPTIONAL_ORIENTATION_SENTENCE`). Neither, either, or both may appear; when
-neither does, the document goes blockquote straight to the first `## ` exactly as before this
-addition.
+blocks of any kind except a heading, then the `## ` sections. `_prose_block` supplies at most
+one: the root page's own first substantial paragraph, when it exists and is not near-identical
+to the blockquote sentence (`_prose_paragraph`; sites routinely lift `og:description` from their
+own hero copy, so the two are the same text more often than not). When there is none, the
+document goes blockquote straight to the first `## `.
+
+**The one free-prose slot the format gives us carries information about the SITE, never about
+this document.** A previous revision spent it, on any run with an `## Optional` section, on a
+fixed sentence explaining the main-body/Optional convention — "Pages above are grouped by topic
+… are grouped under Optional below." It is gone, and deleting it beat repairing it for reasons
+worth keeping written down, because the next person who wants a note in the header will reach
+for this same slot. It described THIS DOCUMENT rather than the site, which is the same mistake
+as the crawl-exclusion clause PER-179's blockquote used to carry and a later ticket removed. It
+explained a convention llmstxt.org already standardizes — `## Optional` means skippable, and a
+consumer that implements the format knows that while one that does not is not rescued by prose
+(`internals/index_diff.py` reads the heading through `OPTIONAL_SECTION`, never any narration
+beside it). Being identical on every run, it carried nothing to a reader who had seen one of
+these files before. As fixed text pointing at a variable section it could not even stay true: it
+said "above" from the position the format pins it to, ABOVE every page it was describing, and it
+named "legal, brand, and archival material" on runs whose Optional section held only legal
+pages. And it competed with the site's own copy for the slot — on a site whose homepage yields
+no usable paragraph it would have been the file's ONLY prose, turning a document about the site
+into a document about its own layout.
 
 **The main body is never empty when there is anything to put in it.** `_ensure_non_empty_main`
 (stage 4's floor, above) is what guarantees this: a site that is entirely legal pages and
@@ -1237,18 +1251,6 @@ it. A two- or three-word tagline is not "a substantial paragraph" even on the ra
 it happens to end in a period; this is what stops a short, punctuated fragment from
 qualifying just because the terminator check alone let it through."""
 
-_OPTIONAL_ORIENTATION_SENTENCE: Final = (
-    "Pages above are grouped by topic and cover what is most useful for understanding this "
-    "site; less central pages — legal, brand, and archival material — are grouped under "
-    "Optional below."
-)
-"""Emitted only when this run's index actually has an `## Optional` section — a sentence about
-how THIS DOCUMENT is organized, not about the generator or the crawl (contrast the exclusion
-clause PER-179's blockquote used to carry, which this ticket removed for exactly that
-confusion). Fixed and count-free on purpose: it explains a convention, not a measurement, so
-it reads the same on every run that has an Optional section rather than needing its own
-description-formatting pass."""
-
 
 def _is_near_identical(a: str, b: str) -> bool:
     """Whether `a` and `b` are the same sentence in substance — an exact match after
@@ -1334,25 +1336,23 @@ def _prose_paragraph(root_page: CrawledPage | None, site_sentence: str | None) -
     return None
 
 
-def _prose_block(
-    root_page: CrawledPage | None, site_sentence: str | None, *, has_optional: bool
-) -> list[str]:
-    """Zero or more markdown blocks between the blockquote and the first `## ` section —
+def _prose_block(root_page: CrawledPage | None, site_sentence: str | None) -> list[str]:
+    """Zero or one markdown block between the blockquote and the first `## ` section —
     llmstxt.org's own optional element, never a heading (see the module docstring's "Shape
-    invariant" section). At most two blocks today: the root page's own prose
-    (`_prose_paragraph`), then — only when this run's index actually has an `## Optional`
-    section — one fixed orientation sentence explaining the main-body/Optional convention
-    (`_OPTIONAL_ORIENTATION_SENTENCE`). Either, both, or neither may be present; when neither
-    is, the document goes blockquote straight to the first `## ` exactly as it did before this
-    addition.
+    invariant" section). The one block is the root page's own prose (`_prose_paragraph`), absent
+    more often than not; when it is absent the document goes blockquote straight to the first
+    `## `.
+
+    Still returns a list, and both generators still loop over it, though it can now hold at most
+    one element. Deliberate: the format permits any number of blocks in this position, this is
+    the seam where a future one would be added, and a list keeps `generate_llms_txt` and
+    `generate_llms_full_txt` reading identically instead of one growing an `if` the other lacks.
+    Read the module docstring's "one free-prose slot" paragraph before putting anything else
+    here — the last thing that lived in this block described the document instead of the site,
+    and it was deleted rather than repaired.
     """
-    blocks: list[str] = []
     paragraph = _prose_paragraph(root_page, site_sentence)
-    if paragraph is not None:
-        blocks.append(paragraph)
-    if has_optional:
-        blocks.append(_OPTIONAL_ORIENTATION_SENTENCE)
-    return blocks
+    return [] if paragraph is None else [paragraph]
 
 
 def _index_summary(site_sentence: str | None, total: int, origin: str) -> str:
@@ -1447,13 +1447,12 @@ def generate_llms_txt(
     entries = _index_entries(pages, origin, sig)
     root_page = _root_page(pages, origin)
     site_sentence = _site_sentence(root_page)
-    has_optional = any(entry.optional for entry in entries)
     lines = [
         f"# {_project_name(root_page, origin)}",
         "",
         _index_summary(site_sentence, len(entries), origin),
     ]
-    for block in _prose_block(root_page, site_sentence, has_optional=has_optional):
+    for block in _prose_block(root_page, site_sentence):
         lines.extend(("", block))
 
     section: str | None = None
@@ -1629,13 +1628,12 @@ def _plan_full_txt(
     entries = _index_entries(pages, origin, signals)
     root_page = _root_page(pages, origin)
     site_sentence = _site_sentence(root_page)
-    has_optional = any(entry.optional for entry in entries)
     header_lines = [
         f"# {_project_name(root_page, origin)}",
         "",
         _full_summary(site_sentence, len(entries), origin),
     ]
-    for block in _prose_block(root_page, site_sentence, has_optional=has_optional):
+    for block in _prose_block(root_page, site_sentence):
         header_lines.extend(("", block))
     header = "\n".join(header_lines) + "\n"
 
