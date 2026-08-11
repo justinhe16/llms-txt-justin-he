@@ -1,0 +1,4 @@
+# Every change to this repository requires review from the owner.
+# Paired with branch protection on `main` (require a PR + code owner review),
+# this means no collaborator can merge to `main` without @justinhe16 approving.
+*  @justinhe16
