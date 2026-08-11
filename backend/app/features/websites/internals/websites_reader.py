@@ -29,6 +29,20 @@ than assuming it.
 the `runs(website_id, started_at DESC)` index from db/schema.prisma, but `DISTINCT ON`
 requires the outer `ORDER BY` to lead with `website_id`, which collides with this endpoint's
 "most recently active first" ordering and would need a wrapping subquery to fix.
+
+**This module is the only place in the codebase that reads `auth.users`.** `_GET_BY_ID`,
+`_LIST_ALL`, and `_LIST_WITH_LATEST_RUN` — the three DISPLAY queries, the ones a router turns
+straight into a response body — each `LEFT JOIN auth.users u ON u.id = w.user_id` to resolve
+the Owner column's real GitHub handle, display name, and avatar instead of a bare `user_id`.
+There is still no foreign key from `websites.user_id` to `auth.users(id)`, and none is added
+by this join: `db/schema.prisma`'s note on `Website.userId` explains why (Supabase owns that
+schema, and CI's test database is a bare `postgres:16` with no `auth` schema at all — a
+migration-time constraint would fail there). A `SELECT`-time join needs no declared
+relationship, so it is exempt from that constraint the same way any other ad-hoc join would
+be. `_GET_BY_USER_AND_ORIGIN` — the dedupe lookup — is deliberately NOT joined; it has no
+owner to display, only a duplicate to detect. See `_OWNER_COLUMNS` below for the one
+prohibition that matters most here: this join must never widen into `SELECT
+raw_user_meta_data` or `email`.
 """
 
 from typing import Any, Final
@@ -43,6 +57,37 @@ from app.infrastructure.db.base_repository import Reader
 _WEBSITE_COLUMNS: Final = (
     "w.id, w.user_id, w.url, w.origin, w.title, w.enrich_with_llm, w.created_at"
 )
+
+# The Owner column's five metadata keys, kept OUT of `_WEBSITE_COLUMNS` on purpose:
+# `_WEBSITE_COLUMNS` is shared with `_GET_BY_USER_AND_ORIGIN`, the per-user dedupe lookup,
+# and fattening it here would drag an `auth.users` join into a query that has no owner to
+# display and every reason to stay the cheapest, most targeted statement in this file. Only
+# the three DISPLAY queries below reference `_OWNER_COLUMNS`.
+#
+# One `->>` expression per named key, explicitly — never `raw_user_meta_data` wholesale and
+# never `email`. Reads in this feature are unscoped (ARCHITECTURE.md §4.1: every signed-in
+# user reads every website), so a wholesale select or an `email` key here would hand every
+# user's email address to every other signed-in user on the very next `GET /websites`. The
+# five keys mirror `frontend/lib/auth/use-user.ts`'s own reading of Supabase's GitHub OAuth
+# metadata exactly, so the handle/display-name fallback (`user_name` then
+# `preferred_username`; `full_name` then `name`) can be resolved identically for the
+# signed-in user and for everyone else — that resolution happens in
+# `service.py`'s `_owner_from_row`, not here, but the five columns it needs are named once,
+# in this one place.
+_OWNER_COLUMNS: Final = """
+    u.raw_user_meta_data ->> 'user_name' AS owner_user_name,
+    u.raw_user_meta_data ->> 'preferred_username' AS owner_preferred_username,
+    u.raw_user_meta_data ->> 'full_name' AS owner_full_name,
+    u.raw_user_meta_data ->> 'name' AS owner_name,
+    u.raw_user_meta_data ->> 'avatar_url' AS owner_avatar_url
+"""
+
+# `LEFT JOIN`, not an inner join: `websites.user_id` carries no foreign key to
+# `auth.users(id)` (db/schema.prisma's note on `Website.userId`), so a website whose owner's
+# Auth row is gone — or never existed, on a database this join is the first to notice is
+# missing one — must still be returned, with every `_OWNER_COLUMNS` value `NULL` rather than
+# the whole row vanishing from the result set.
+_OWNER_JOIN: Final = "LEFT JOIN auth.users u ON u.id = w.user_id"
 
 # "Most recently active first": the newest run's start time, falling back to when the
 # website was added for one that has never run. Used as the sort key by BOTH list queries,
@@ -88,8 +133,9 @@ _PAGES_CRAWLED: Final = """
 """
 
 _GET_BY_ID: Final = f"""
-    SELECT {_WEBSITE_COLUMNS}
+    SELECT {_WEBSITE_COLUMNS}, {_OWNER_COLUMNS}
     FROM websites w
+    {_OWNER_JOIN}
     WHERE w.id = $1
 """
 
@@ -101,8 +147,9 @@ _GET_BY_USER_AND_ORIGIN: Final = f"""
 
 # No WHERE clause. That is the point — see the module docstring.
 _LIST_ALL: Final = f"""
-    SELECT {_WEBSITE_COLUMNS}
+    SELECT {_WEBSITE_COLUMNS}, {_OWNER_COLUMNS}
     FROM websites w
+    {_OWNER_JOIN}
     LEFT JOIN LATERAL (
         SELECT r.started_at
         FROM runs r
@@ -113,10 +160,12 @@ _LIST_ALL: Final = f"""
     {_ACTIVITY_ORDER}
 """
 
-# Also no WHERE clause, and one statement for the whole page.
+# Also no WHERE clause, and one statement for the whole page — the `auth.users` join
+# included, since it keys on `w.user_id` alone and adds no per-row subquery of its own.
 _LIST_WITH_LATEST_RUN: Final = f"""
     SELECT
         {_WEBSITE_COLUMNS},
+        {_OWNER_COLUMNS},
         latest.id AS latest_run_id,
         latest.status AS latest_run_status,
         latest.started_at AS latest_run_started_at,
@@ -126,6 +175,7 @@ _LIST_WITH_LATEST_RUN: Final = f"""
         s.interval_minutes AS schedule_interval_minutes,
         s.next_run_at AS schedule_next_run_at
     FROM websites w
+    {_OWNER_JOIN}
     {_LATEST_RUN_LATERAL}
     LEFT JOIN schedules s ON s.website_id = w.id
     {_ACTIVITY_ORDER}

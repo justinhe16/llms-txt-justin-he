@@ -8,6 +8,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { anyRunActive } from "@/lib/api/run-status";
 import { useUser } from "@/lib/auth/use-user";
 import { DETAIL_TABS, type DetailTab } from "@/lib/crawls/detail-tabs";
+import { ownerIdentity } from "@/lib/crawls/owner";
 import { rowStatusFromRunStatus, type RowStatus } from "@/lib/crawls/row-status";
 import { useDetailView } from "@/lib/crawls/use-detail-view";
 import { flattenRunPages, useRunsInfinite } from "@/lib/query/use-runs-infinite";
@@ -53,6 +54,15 @@ const TAB_LABELS: Record<DetailTab, string> = {
  * Radix renders only the active tab's content, so the Output tab issues no detail request
  * until someone opens it — which is what keeps a page load from fetching an artifact nobody
  * asked to see.
+ *
+ * ## This is also the one place that resolves the owner's identity for "not the owner" copy
+ *
+ * `ownerLabel` below is computed once, from `website.owner` (`lib/crawls/owner.ts`'s
+ * `ownerIdentity`), and handed down to `RunNowButton`, `ScheduleTab`, `EnrichmentPanel`, and
+ * `PublishPanel` — the four places that tell a non-owner "Only the owner (…) can …". Each of
+ * those already took `ownerUserId` from this same hub before `owner` existed to resolve into
+ * a real name; swapping that one prop for its resolved form keeps the fan-out at one prop
+ * per component instead of turning `owner`'s three fields into three more.
  */
 export function WebsiteDetail({ websiteId }: { websiteId: string }) {
   const {
@@ -99,6 +109,15 @@ export function WebsiteDetail({ websiteId }: { websiteId: string }) {
   const hasEverRun = runsQuery.isPending ? null : runs.length > 0;
 
   const isOwner = user !== null && website !== undefined && user.id === website.user_id;
+
+  // The real, resolved form of "who owns this" for every "not the owner" message on this
+  // page — `null` only while `website` itself has not loaded yet. `currentUserId` is always
+  // `null` here (never `user?.id`) on purpose: every consumer of `ownerLabel` renders it
+  // only in a branch that already knows the viewer is NOT the owner, so "you" is never a
+  // correct answer for it to produce, and passing `null` keeps that invariant visible at
+  // the call site instead of resting on which branch happens to call it.
+  const ownerLabel =
+    website !== undefined ? ownerIdentity(website.user_id, null, website.owner).label : null;
 
   return (
     // `min-w-0` here and on every tab panel below is what actually keeps the page body from
@@ -156,7 +175,7 @@ export function WebsiteDetail({ websiteId }: { websiteId: string }) {
                     <span aria-hidden="true" className="text-muted-foreground/40">
                       ·
                     </span>
-                    <CrawlOwner userId={website.user_id} focusable />
+                    <CrawlOwner userId={website.user_id} owner={website.owner} focusable />
                   </div>
                 </>
               )}
@@ -165,7 +184,7 @@ export function WebsiteDetail({ websiteId }: { websiteId: string }) {
             {website !== undefined && (
               <RunNowButton
                 websiteId={websiteId}
-                ownerUserId={website.user_id}
+                ownerLabel={ownerLabel}
                 isOwner={isOwner}
                 hasActiveRun={hasActiveRun}
                 onShowRun={showRunOutput}
@@ -225,7 +244,7 @@ export function WebsiteDetail({ websiteId }: { websiteId: string }) {
             <TabsContent value="schedule" className="mt-6 min-w-0 space-y-6">
               <ScheduleTab
                 websiteId={websiteId}
-                ownerUserId={website?.user_id ?? null}
+                ownerLabel={ownerLabel}
                 isOwner={isOwner}
                 // The newest run, for the panel's "Last run" line. `ScheduleResponse` carries
                 // a `last_run_at` but no status to go beside it, so the status comes from the
@@ -238,7 +257,7 @@ export function WebsiteDetail({ websiteId }: { websiteId: string }) {
                   for the distinction it now draws against PublishPanel, which did. */}
               <EnrichmentPanel
                 websiteId={websiteId}
-                ownerUserId={website?.user_id ?? null}
+                ownerLabel={ownerLabel}
                 isOwner={isOwner}
               />
             </TabsContent>
@@ -246,7 +265,7 @@ export function WebsiteDetail({ websiteId }: { websiteId: string }) {
             <TabsContent value="publish" className="mt-6 min-w-0">
               <PublishPanel
                 websiteId={websiteId}
-                ownerUserId={website?.user_id ?? null}
+                ownerLabel={ownerLabel}
                 isOwner={isOwner}
               />
             </TabsContent>

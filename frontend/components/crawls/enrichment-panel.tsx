@@ -7,7 +7,6 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ENRICHMENT_HELP, ENRICHMENT_LABEL } from "@/lib/crawls/enrichment-copy";
-import { ownerIdentity } from "@/lib/crawls/owner";
 import { useUpdateWebsite } from "@/lib/query/use-update-website";
 import { useWebsite } from "@/lib/query/use-website";
 
@@ -57,12 +56,15 @@ function EnrichmentPanelSkeleton() {
  */
 export function EnrichmentPanel({
   websiteId,
-  ownerUserId,
+  ownerLabel,
   isOwner,
 }: {
   websiteId: string;
-  /** The website's owner. `null` while the website query is still resolving. */
-  ownerUserId: string | null;
+  /** The owner's resolved identity — `@handle`, a display name, or a short id fallback,
+   * never "you" (`website-detail.tsx`'s `ownerLabel`, via `lib/crawls/owner.ts`'s
+   * `ownerIdentity`) — for the "Only the owner (…) can …" copy below. `null` while the
+   * website query is still resolving. */
+  ownerLabel: string | null;
   isOwner: boolean;
 }) {
   const checkboxId = useId();
@@ -98,9 +100,9 @@ export function EnrichmentPanel({
   // rather than a precedence list.
   const disabledReason = isOwner
     ? null
-    : ownerUserId === null
+    : ownerLabel === null
       ? "Only the owner can change this."
-      : `Only the owner (${ownerIdentity(ownerUserId, null).label}) can change this.`;
+      : `Only the owner (${ownerLabel}) can change this.`;
 
   const checkbox = (
     <Checkbox

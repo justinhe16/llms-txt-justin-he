@@ -1435,6 +1435,33 @@ scheme + host and is the dedupe key. `UNIQUE (user_id, origin)` stops one user a
 same site twice while letting two users each add it — it is a dedupe key, not a tenancy
 boundary (§4).
 
+**The Owner column reads `auth.users`, and `websites_reader.py` is the only place in this
+codebase that does.** `backend/app/features/websites/internals/websites_reader.py`'s three
+DISPLAY queries — `_GET_BY_ID`, `_LIST_ALL`, `_LIST_WITH_LATEST_RUN` — each `LEFT JOIN
+auth.users u ON u.id = w.user_id` to resolve a real GitHub handle, display name, and avatar
+for the Owner column, in place of the bare `user_id` the frontend used to fall back to
+(`frontend/lib/crawls/owner.ts`). This is a **SELECT-time join, not a foreign key**:
+`user_id`'s own note above still holds, unchanged, for the identical reason — Supabase owns
+the `auth` schema, and CI's test database is a bare `postgres:16` with no `auth` schema at
+all, which a *migration-time* constraint would fail against but a plain join needs no
+declared relationship to run at all. `backend/tests/conftest.py`'s `db_pool` fixture stands
+up a stub `auth.users` (`id`, `raw_user_meta_data` only — an imitation of Supabase's real
+table, not a copy of it) so this join has something to run against in CI, and is careful
+to create — and later drop — only the schema/table it did not find already there, since the
+local Supabase stack `make dev` wires up already has a real one. `_GET_BY_USER_AND_ORIGIN`,
+the per-user dedupe lookup, is deliberately NOT joined — it has no owner to display. The
+five metadata keys the join reads (`user_name`, `preferred_username`, `full_name`, `name`,
+`avatar_url`) are named explicitly, one `->>` expression each, and `email` is never one of
+them: reads on this feature are unscoped (§4.1 — every signed-in user reads every website),
+so selecting `email` would hand every user's address to every other signed-in user on the
+next `GET /websites`.
+
+**Operational consequence:** the API's database role now needs read access to the `auth`
+schema, not only `public`. On Supabase this is normally the `postgres` role the backend
+already connects as, so this is not expected to be a new grant in practice — but it is a
+real runtime assumption this feature adds where none existed before, and it is worth
+confirming against the production `DATABASE_URL` role rather than silently assuming it.
+
 **`enrich_with_llm`** (PER-194) — the owner's intent to have this website's runs ask for
 model-assisted summarization, default `false`. It is HALF of the enrichment gate: a run
 actually enriches only when this column AND the deployment-wide `Settings.crawl_enrich_with_llm`

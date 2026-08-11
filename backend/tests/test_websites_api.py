@@ -28,8 +28,11 @@ import pytest
 from asyncpg import Connection, Pool, UniqueViolationError
 from conftest import (
     TEST_USER_A_ID,
+    TEST_USER_A_METADATA,
     TEST_USER_B_ID,
+    TEST_USER_B_METADATA,
     parse,
+    seed_auth_user,
     seed_run,
     seed_schedule,
     seed_website,
@@ -37,6 +40,7 @@ from conftest import (
 from fastapi import HTTPException
 from httpx import AsyncClient
 
+from app.features.websites.internals import websites_reader as websites_reader_module
 from app.features.websites.internals.websites_reader import WebsitesReader
 from app.features.websites.internals.websites_writer import WebsitesWriter
 from app.features.websites.schemas import CreateWebsiteRequest
@@ -511,13 +515,34 @@ async def test_a_non_owner_can_read_a_website_by_id(
 
     This is also what makes 403-not-404 the right answer on DELETE — the resource's
     existence is already public to every signed-in user.
+
+    Every field but `owner` is compared for equality against the `POST` response. `owner`
+    is asserted separately, and against a fixed expectation rather than `created["owner"]`,
+    because the two responses are built by two different code paths that were never meant to
+    agree here: `POST /websites` returns the WRITER's `RETURNING` row, which carries no
+    `auth.users` join (only `websites_reader.py`'s three DISPLAY queries do — see that
+    module's docstring), so a website answers `owner: null` on its own creation response and
+    the real owner on every read after it. That is a deliberate scope boundary, not a leak
+    this test should paper over by asserting the two response bodies equal when they no
+    longer are.
     """
     created = (await user_client.post("/websites", json={"url": "https://readable.example"})).json()
 
     response = await second_user_client.get(f"/websites/{created['id']}")
 
     assert response.status_code == 200
-    assert response.json() == created
+    body = response.json()
+    assert {k: v for k, v in body.items() if k != "owner"} == {
+        k: v for k, v in created.items() if k != "owner"
+    }
+    assert created["owner"] is None
+    # The non-owner (`second_user_client`) sees the SAME real owner data the owner itself
+    # would on a `GET` — nothing about this caller's identity narrows or hides it.
+    assert body["owner"] == {
+        "handle": TEST_USER_A_METADATA["user_name"],
+        "display_name": TEST_USER_A_METADATA["full_name"],
+        "avatar_url": TEST_USER_A_METADATA["avatar_url"],
+    }
 
 
 async def test_getting_an_unknown_id_returns_404(user_client: AsyncClient) -> None:
@@ -548,6 +573,172 @@ async def test_a_non_owner_reads_enrich_with_llm_on_get(
 
 
 # -----------------------------------------------------------------------------------------
+# The Owner column — websites_reader.py's `LEFT JOIN auth.users`, exercised through `GET
+# /websites/{id}` here. `test_a_non_owner_can_read_a_website_by_id` above already covers the
+# common case (full metadata, read by a non-owner) end to end; this section covers the
+# join's edges — an `auth.users` row with nothing usable in it, and no row at all — plus the
+# query-count and no-email guarantees that make the join safe to have added in the first
+# place.
+# -----------------------------------------------------------------------------------------
+
+
+@pytest.fixture
+async def stray_owner(websites_db: Pool) -> AsyncIterator[UUID]:
+    """A `user_id` outside `TEST_USER_A_ID`/`TEST_USER_B_ID` — for the Owner tests that need
+    a website owner `websites_db`'s own before/after cleanup does not know to remove. Cleans
+    up whichever of `websites`/`auth.users` the test populated, regardless of which (or
+    both) it used, so a test does not have to know which to clean up itself.
+    """
+    user_id = uuid4()
+    yield user_id
+    await websites_db.execute("DELETE FROM websites WHERE user_id = $1", user_id)
+    await websites_db.execute("DELETE FROM auth.users WHERE id = $1", user_id)
+
+
+async def test_owner_resolves_handle_display_name_and_avatar_for_full_github_metadata(
+    user_client: AsyncClient, websites_db: Pool
+) -> None:
+    """The happy path: `TEST_USER_A_ID`'s seeded `auth.users` row (conftest.py) carries the
+    PRIMARY key of each pair — `user_name`, `full_name` — and `GET /websites/{id}` resolves
+    all three `owner` fields from it."""
+    website_id = await seed_website(websites_db, TEST_USER_A_ID, "https://full-metadata.example")
+
+    response = await user_client.get(f"/websites/{website_id}")
+
+    assert response.status_code == 200
+    assert response.json()["owner"] == {
+        "handle": TEST_USER_A_METADATA["user_name"],
+        "display_name": TEST_USER_A_METADATA["full_name"],
+        "avatar_url": TEST_USER_A_METADATA["avatar_url"],
+    }
+
+
+async def test_owner_falls_back_to_preferred_username_and_name(
+    user_client: AsyncClient, second_user_client: AsyncClient, websites_db: Pool
+) -> None:
+    """`TEST_USER_B_ID`'s seeded row (conftest.py) carries only the FALLBACK key of each
+    pair — `preferred_username`, never `user_name`; `name`, never `full_name` — so reading
+    it back (as the non-owner, same as `test_a_non_owner_can_read_a_website_by_id`) is proof
+    the fallback half of each `COALESCE`-equivalent chain works, not just the primary half.
+    """
+    website_id = await seed_website(
+        websites_db, TEST_USER_B_ID, "https://fallback-metadata.example"
+    )
+
+    response = await second_user_client.get(f"/websites/{website_id}")
+
+    assert response.status_code == 200
+    assert response.json()["owner"] == {
+        "handle": TEST_USER_B_METADATA["preferred_username"],
+        "display_name": TEST_USER_B_METADATA["name"],
+        "avatar_url": TEST_USER_B_METADATA["avatar_url"],
+    }
+
+
+async def test_owner_is_null_for_a_user_with_no_usable_metadata(
+    user_client: AsyncClient, websites_db: Pool, stray_owner: UUID
+) -> None:
+    """An `auth.users` row that EXISTS but carries none of the five named keys — the local
+    dev password sign-in path, for instance, or a GitHub account that never set an avatar or
+    a display name — must not error, and must not fabricate a handle out of whatever else is
+    in `raw_user_meta_data`. `owner` collapses to `None` at the top level (`Owner`'s own
+    docstring), never to `{"handle": null, "display_name": null, "avatar_url": null}`.
+    """
+    await seed_auth_user(websites_db, stray_owner, {"some_other_key": "not one we read"})
+    website_id = await seed_website(websites_db, stray_owner, "https://no-usable-metadata.example")
+
+    response = await user_client.get(f"/websites/{website_id}")
+
+    assert response.status_code == 200
+    assert response.json()["owner"] is None
+
+
+async def test_owner_is_null_for_a_user_absent_from_auth_users_entirely(
+    user_client: AsyncClient, websites_db: Pool, stray_owner: UUID
+) -> None:
+    """The `LEFT JOIN` (not an inner join) is what makes this the one case that needs NO
+    `auth.users` row seeded at all to prove: a website whose owner has no row there —
+    entirely plausible in production, since `websites.user_id` carries no foreign key to
+    `auth.users(id)` (db/schema.prisma's note on `Website.userId`) — still returns `200`
+    with `owner: null`, never a `500`.
+    """
+    website_id = await seed_website(websites_db, stray_owner, "https://absent-owner.example")
+
+    response = await user_client.get(f"/websites/{website_id}")
+
+    assert response.status_code == 200
+    assert response.json()["owner"] is None
+
+
+async def test_owner_never_carries_an_email(
+    user_client: AsyncClient, websites_db: Pool, stray_owner: UUID
+) -> None:
+    """The one prohibition that matters most in `websites_reader.py`: a signed-in caller
+    must never see another user's email address on this endpoint, even indirectly. Seeds a
+    row with `email` alongside real handle/avatar keys, in Supabase's own actual shape, so
+    this is a test that the reader's SQL does not select it at all — not a test that
+    pydantic happens to drop an extra field it was handed.
+    """
+    await seed_auth_user(
+        websites_db,
+        stray_owner,
+        {
+            "user_name": "has-an-email",
+            "avatar_url": "https://avatars.githubusercontent.com/u/99?v=4",
+            "email": "should-never-appear@example.com",
+        },
+    )
+    website_id = await seed_website(websites_db, stray_owner, "https://no-email-leak.example")
+
+    response = await user_client.get(f"/websites/{website_id}")
+
+    assert response.status_code == 200
+    assert "should-never-appear@example.com" not in response.text
+    owner = response.json()["owner"]
+    assert owner is not None
+    assert "email" not in owner
+
+
+def test_the_owner_columns_never_select_email() -> None:
+    """A source-level guarantee alongside `test_owner_never_carries_an_email`'s response-body
+    one: the reader's SQL itself must never mention `email`, so a future edit that widens
+    `_OWNER_COLUMNS` cannot reintroduce the leak even in a code path this suite's fixtures do
+    not happen to exercise.
+    """
+    assert "email" not in websites_reader_module._OWNER_COLUMNS.lower()
+    assert "email" not in websites_reader_module._GET_BY_ID.lower()
+    assert "email" not in websites_reader_module._LIST_ALL.lower()
+    assert "email" not in websites_reader_module._LIST_WITH_LATEST_RUN.lower()
+
+
+async def test_the_owner_join_adds_no_extra_query_to_either_list_query(
+    websites_db: Pool,
+    counting_reader: tuple[WebsitesReader, _CountingHandle],
+) -> None:
+    """`_OWNER_JOIN` (websites_reader.py) keys on `w.user_id` alone — no correlated
+    subquery, no per-row lookup — so it must not add to the query count
+    `test_the_latest_run_fold_costs_one_query_regardless_of_row_count` already measures for
+    the fold. Measured for BOTH display list queries this join touches: `list_all` backs the
+    plain `GET /websites` and had no query-count test before this join gave it a second join
+    to regress on.
+    """
+    for index in range(3):
+        await seed_website(websites_db, TEST_USER_A_ID, f"https://owner-join-{index}.example")
+
+    reader, handle = counting_reader
+
+    handle.query_count = 0
+    plain_rows = await reader.list_all()
+    assert handle.query_count == 1
+    assert any(row["owner_user_name"] == TEST_USER_A_METADATA["user_name"] for row in plain_rows)
+
+    handle.query_count = 0
+    folded_rows = await reader.list_all_with_latest_run()
+    assert handle.query_count == 1
+    assert any(row["owner_user_name"] == TEST_USER_A_METADATA["user_name"] for row in folded_rows)
+
+
+# -----------------------------------------------------------------------------------------
 # PATCH /websites/{id}
 # -----------------------------------------------------------------------------------------
 
@@ -568,6 +759,35 @@ async def test_patching_your_own_website_toggles_enrichment_and_returns_the_upda
     assert body["id"] == created["id"]
     assert body["url"] == created["url"]
     assert body["origin"] == created["origin"]
+
+
+async def test_patching_returns_owner_null_though_a_subsequent_get_resolves_it(
+    user_client: AsyncClient,
+) -> None:
+    """PATCH has the identical write/read asymmetry `test_a_non_owner_can_read_a_website_by_id`
+    pins for POST, and for the same reason: `WebsitesWriter.update`'s `RETURNING` row, like
+    `.insert`'s, carries no `auth.users` join — only `websites_reader.py`'s three DISPLAY
+    queries do — so a website answers `owner: null` on its own `PATCH` response and the real
+    owner on the very next `GET`. `service.py`'s `_owner_from_row` records why that gap is
+    deliberate rather than an oversight: this response can only ever describe the caller who
+    just wrote it (`require_owner` guarantees that), and that is exactly the row the frontend
+    already renders from the caller's own session, never from `owner`.
+    """
+    created = (
+        await user_client.post("/websites", json={"url": "https://patch-owner-gap.example"})
+    ).json()
+
+    patched = await user_client.patch(f"/websites/{created['id']}", json={"enrich_with_llm": True})
+    assert patched.status_code == 200
+    assert patched.json()["owner"] is None
+
+    response = await user_client.get(f"/websites/{created['id']}")
+    assert response.status_code == 200
+    assert response.json()["owner"] == {
+        "handle": TEST_USER_A_METADATA["user_name"],
+        "display_name": TEST_USER_A_METADATA["full_name"],
+        "avatar_url": TEST_USER_A_METADATA["avatar_url"],
+    }
 
 
 async def test_patching_another_users_website_is_403_and_the_stored_value_is_unchanged(

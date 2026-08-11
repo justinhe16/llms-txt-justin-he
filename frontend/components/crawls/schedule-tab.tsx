@@ -4,7 +4,6 @@ import { Lock } from "lucide-react";
 
 import { Skeleton } from "@/components/ui/skeleton";
 import type { RunListItem } from "@/lib/api/runs";
-import { ownerIdentity } from "@/lib/crawls/owner";
 import { useScheduleEditor } from "@/lib/crawls/use-schedule-editor";
 import { useSchedule } from "@/lib/query/use-schedule";
 
@@ -66,13 +65,16 @@ function ScheduleSkeleton() {
  */
 export function ScheduleTab({
   websiteId,
-  ownerUserId,
+  ownerLabel,
   isOwner,
   latestRun,
 }: {
   websiteId: string;
-  /** The website's owner. `null` while the website query is still resolving. */
-  ownerUserId: string | null;
+  /** The owner's resolved identity — `@handle`, a display name, or a short id fallback,
+   * never "you" (`website-detail.tsx`'s `ownerLabel`, via `lib/crawls/owner.ts`'s
+   * `ownerIdentity`) — for the "Only the owner (…) can …" copy below. `null` while the
+   * website query is still resolving. */
+  ownerLabel: string | null;
   isOwner: boolean;
   latestRun: RunListItem | null;
 }) {
@@ -101,9 +103,9 @@ export function ScheduleTab({
   // resolving. A single unexplained "disabled" is the version of this panel that generates
   // support questions.
   const disabledReason = !canEdit
-    ? ownerUserId === null
+    ? ownerLabel === null
       ? "Only the owner can change this schedule."
-      : `Only the owner (${ownerIdentity(ownerUserId, null).label}) can change this schedule.`
+      : `Only the owner (${ownerLabel}) can change this schedule.`
     : editor.needsIntervalChoice
       ? "This schedule uses an interval that is not one of the presets. Choose one below to change it."
       : null;
@@ -137,10 +139,10 @@ export function ScheduleTab({
       {!canEdit && (
         <p className="flex items-start gap-2 border-t border-border pt-6 text-sm text-muted-foreground">
           <Lock aria-hidden="true" className="mt-0.5 size-3.5 shrink-0" />
-          {/* No `@handle`: the API exposes `user_id` and nothing else, and there is no
-              `/users` endpoint to resolve it (see lib/crawls/owner.ts). A short id is honest
-              where a fabricated handle is the kind of thing someone pastes into a search
-              box. */}
+          {/* `ownerLabel` is already the owner's real `@handle` or display name when one is
+              known (see website-detail.tsx and lib/crawls/owner.ts) — falling back to a
+              short, honest id only when the owner has no usable GitHub metadata, never a
+              fabricated handle. */}
           <span>{disabledReason}</span>
         </p>
       )}

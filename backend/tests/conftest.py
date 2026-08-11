@@ -173,6 +173,10 @@ async def db_pool() -> AsyncIterator[Pool]:
     `transaction()` (app/infrastructure/db/transaction.py) acquires an arbitrary
     connection from the pool, and a `TEMP` table would only be visible on the connection
     that created it.
+
+    Also stands up (and seeds, and tears down) the `auth.users` stub — see the section
+    comment above `_AUTH_USERS_STUB` below for what that is and, more importantly, what it
+    is careful NOT to do to a database that already has a real one.
     """
     if not TEST_DATABASE_URL:
         pytest.skip(
@@ -195,7 +199,37 @@ async def db_pool() -> AsyncIterator[Pool]:
         f"CREATE TABLE IF NOT EXISTS {_SCRATCH_TABLE} (key text PRIMARY KEY, value text NOT NULL)"
     )
 
+    # Whether THIS session created the `auth` schema and/or `auth.users` table, tracked
+    # independently so teardown drops only what it made. CI's bare `postgres:16` (no `auth`
+    # schema at all) makes both `True`; the local Supabase stack `make dev` wires up already
+    # has a real `auth` schema and a real `auth.users`, which makes both `False` and this
+    # fixture touch neither beyond the two rows `_seed_default_auth_users` inserts and later
+    # removes. `IF NOT EXISTS` on both statements is what keeps a re-run against a dirty
+    # local database — one that crashed mid-suite last time and left the schema/table
+    # behind — from erroring instead of proceeding.
+    owns_auth_schema = await pool.fetchval("SELECT to_regnamespace('auth') IS NULL")
+    if owns_auth_schema:
+        await pool.execute("CREATE SCHEMA IF NOT EXISTS auth")
+
+    owns_auth_users_table = await pool.fetchval("SELECT to_regclass('auth.users') IS NULL")
+    if owns_auth_users_table:
+        await pool.execute(_AUTH_USERS_STUB)
+
+    await _seed_default_auth_users(pool)
+
     yield pool
+
+    # Reverse order: rows first (always ours to remove), then the table, then the schema —
+    # each guarded by `IF EXISTS`/`IF NOT EXISTS` for the same "safe to re-run against a
+    # dirty database" reason the creation side is. Dropping the table before the schema is
+    # not optional: `DROP SCHEMA` on a non-empty schema (one this fixture did NOT create the
+    # table in, or one where a developer's real Supabase data still lives) would either fail
+    # or, with the wrong flag, take that data with it — never attempted here.
+    await _delete_default_auth_users(pool)
+    if owns_auth_users_table:
+        await pool.execute("DROP TABLE IF EXISTS auth.users")
+    if owns_auth_schema:
+        await pool.execute("DROP SCHEMA IF EXISTS auth")
 
     await pool.execute(f"DROP TABLE IF EXISTS {_SCRATCH_TABLE}")
     await pool.close()
@@ -499,6 +533,91 @@ TEST_USER_A_ID: Final = UUID("aaaaaaaa-0000-4000-8000-000000000001")
 TEST_USER_B_ID: Final = UUID("bbbbbbbb-0000-4000-8000-000000000002")
 
 _TEST_USER_IDS: Final = (TEST_USER_A_ID, TEST_USER_B_ID)
+
+
+# -----------------------------------------------------------------------------------------
+# The `auth.users` stub — a STUB of Supabase's real Auth table, not a copy of it, standing
+# in only for the two columns `app.features.websites.internals.websites_reader`'s
+# `_OWNER_COLUMNS` reads: `id` and `raw_user_meta_data`. Supabase's actual `auth.users`
+# carries dozens of columns this table does not (`email`, `encrypted_password`,
+# `confirmed_at`, and more) — deliberately, because the websites reader touches none of
+# them (see that module's own prohibition on selecting `email` or the metadata blob
+# wholesale). A test passing against this stub proves the reader's SQL and the service's
+# fallback logic behave against OUR imitation of Supabase's shape; it is not a guarantee
+# that a column this stub omits would behave the same way against the real one.
+#
+# `db_pool` (above) creates this table — and the `auth` schema, if neither already exists —
+# for exactly one reason: CI's test database is a bare `postgres:16` service container with
+# no `auth` schema at all (ARCHITECTURE.md's note on `db/schema.prisma`'s
+# `Website.userId`), and the websites API tests below drive the real app over that real
+# Postgres, so every one of them would 500 on the reader's `LEFT JOIN auth.users` without
+# it. The local Supabase stack `make dev` wires up already has a real `auth.users`, which is
+# why `db_pool` tracks whether IT created the schema/table before deciding whether to drop
+# either — see that fixture's own comments.
+# -----------------------------------------------------------------------------------------
+
+_AUTH_USERS_STUB: Final = """
+    CREATE TABLE IF NOT EXISTS auth.users (
+        id uuid PRIMARY KEY,
+        raw_user_meta_data jsonb
+    )
+"""
+
+# Seeded into `auth.users` by `db_pool` for the whole test session, and read back by every
+# owner test in tests/test_websites_api.py. Deliberately split across the two PRIMARY keys
+# `_OWNER_COLUMNS` prefers (`user_name`, `full_name`) and the two FALLBACK keys it reads
+# only when the primary is absent (`preferred_username`, `name`) — A carries only the
+# former pair, B carries only the latter — so a test built on either fixture user is,
+# incidentally, also proof that the right key of each pair won.
+TEST_USER_A_METADATA: Final = {
+    "user_name": "test-user-a",
+    "full_name": "Test User A",
+    "avatar_url": "https://avatars.githubusercontent.com/u/1?v=4",
+}
+TEST_USER_B_METADATA: Final = {
+    "preferred_username": "test-user-b",
+    "name": "Test User B",
+    "avatar_url": "https://avatars.githubusercontent.com/u/2?v=4",
+}
+
+
+async def seed_auth_user(
+    pool: Pool, user_id: UUID, raw_user_meta_data: dict[str, Any] | None
+) -> None:
+    """Insert, or overwrite, one stub `auth.users` row directly.
+
+    Promoted alongside `seed_website`/`seed_run`/`seed_schedule` below rather than kept
+    local to `db_pool`: those two default rows cover the fixture users every existing test
+    already signs in as, but `tests/test_websites_api.py`'s owner tests also need a THIRD
+    user who has a row with no usable metadata at all (`raw_user_meta_data={}` — pass
+    `None` for that, which this seeds as `'{}'::jsonb`) — the other of the two cases the
+    reader's `LEFT JOIN` must resolve to `owner: null` without erroring, alongside a
+    `user_id` this table has no row for whatsoever, which needs no call here to prove.
+
+    `ON CONFLICT ... DO UPDATE` rather than a plain `INSERT`, so a test may call this again
+    for a `user_id` `db_pool` already seeded (or a previous test already seeded) without a
+    `UniqueViolationError` — the same idempotency the table's own `CREATE ... IF NOT
+    EXISTS` is for.
+    """
+    await pool.execute(
+        "INSERT INTO auth.users (id, raw_user_meta_data) VALUES ($1, $2::jsonb) "
+        "ON CONFLICT (id) DO UPDATE SET raw_user_meta_data = EXCLUDED.raw_user_meta_data",
+        user_id,
+        json.dumps(raw_user_meta_data or {}),
+    )
+
+
+async def _seed_default_auth_users(pool: Pool) -> None:
+    """Seed `TEST_USER_A_ID` / `TEST_USER_B_ID`'s `auth.users` rows for the whole session."""
+    await seed_auth_user(pool, TEST_USER_A_ID, TEST_USER_A_METADATA)
+    await seed_auth_user(pool, TEST_USER_B_ID, TEST_USER_B_METADATA)
+
+
+async def _delete_default_auth_users(pool: Pool) -> None:
+    """The `db_pool` teardown half of `_seed_default_auth_users` — removes only those two
+    rows, never anything else `auth.users` might hold (a developer's real Supabase data,
+    or a row an individual test seeded and is responsible for cleaning up itself)."""
+    await pool.execute("DELETE FROM auth.users WHERE id = ANY($1::uuid[])", list(_TEST_USER_IDS))
 
 
 def _bearer_headers(key: _SigningKey, user_id: UUID) -> dict[str, str]:

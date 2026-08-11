@@ -278,6 +278,51 @@
         "title": "LatestRunSummary",
         "type": "object"
       },
+      "Owner": {
+        "description": "The resolved identity behind a website's `user_id`, read from Supabase Auth.\n\n`websites_reader.py`'s `_GET_BY_ID`, `_LIST_ALL`, and `_LIST_WITH_LATEST_RUN` each\n`LEFT JOIN auth.users` to produce the five named `raw_user_meta_data` keys this model is\nbuilt from (`service.py`'s `_owner_from_row`) — the same fields, and the same two\nfallback chains (`user_name` then `preferred_username` for `handle`; `full_name` then\n`name` for `display_name`), that `frontend/lib/auth/use-user.ts` already reads for the\n*signed-in* user alone. This is what lets everyone else's row be named the same way\ninstead of falling back to a bare id.\n\n**Never carries an email.** Reads on this feature are unscoped (ARCHITECTURE.md\n§4.1 — every signed-in user reads every website), so a field here that leaked an email\nwould hand every user's address to every other signed-in user on the next `GET\n/websites`. `websites_reader.py`'s `_OWNER_COLUMNS` selects five named keys and nothing\nelse; this model has three fields and nothing else; keep it that way.",
+        "properties": {
+          "avatar_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Avatar Url"
+          },
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name"
+          },
+          "handle": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Handle"
+          }
+        },
+        "required": [
+          "handle",
+          "display_name",
+          "avatar_url"
+        ],
+        "title": "Owner",
+        "type": "object"
+      },
       "Page_RunListItemResponse_": {
         "properties": {
           "items": {
@@ -1479,6 +1524,16 @@
             "title": "Origin",
             "type": "string"
           },
+          "owner": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Owner"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "schedule": {
             "anyOf": [
               {
@@ -1517,7 +1572,8 @@
           "origin",
           "title",
           "enrich_with_llm",
-          "created_at"
+          "created_at",
+          "owner"
         ],
         "title": "WebsiteListItemResponse",
         "type": "object"
@@ -1542,6 +1598,16 @@
           "origin": {
             "title": "Origin",
             "type": "string"
+          },
+          "owner": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Owner"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "title": {
             "anyOf": [
@@ -1571,7 +1637,8 @@
           "origin",
           "title",
           "enrich_with_llm",
-          "created_at"
+          "created_at",
+          "owner"
         ],
         "title": "WebsiteResponse",
         "type": "object"

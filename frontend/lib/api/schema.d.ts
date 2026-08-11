@@ -623,6 +623,32 @@ export interface components {
              */
             status: "pending" | "processing" | "completed" | "failed";
         };
+        /**
+         * Owner
+         * @description The resolved identity behind a website's `user_id`, read from Supabase Auth.
+         *
+         *     `websites_reader.py`'s `_GET_BY_ID`, `_LIST_ALL`, and `_LIST_WITH_LATEST_RUN` each
+         *     `LEFT JOIN auth.users` to produce the five named `raw_user_meta_data` keys this model is
+         *     built from (`service.py`'s `_owner_from_row`) — the same fields, and the same two
+         *     fallback chains (`user_name` then `preferred_username` for `handle`; `full_name` then
+         *     `name` for `display_name`), that `frontend/lib/auth/use-user.ts` already reads for the
+         *     *signed-in* user alone. This is what lets everyone else's row be named the same way
+         *     instead of falling back to a bare id.
+         *
+         *     **Never carries an email.** Reads on this feature are unscoped (ARCHITECTURE.md
+         *     §4.1 — every signed-in user reads every website), so a field here that leaked an email
+         *     would hand every user's address to every other signed-in user on the next `GET
+         *     /websites`. `websites_reader.py`'s `_OWNER_COLUMNS` selects five named keys and nothing
+         *     else; this model has three fields and nothing else; keep it that way.
+         */
+        Owner: {
+            /** Avatar Url */
+            avatar_url: string | null;
+            /** Display Name */
+            display_name: string | null;
+            /** Handle */
+            handle: string | null;
+        };
         /** Page[RunListItemResponse] */
         Page_RunListItemResponse_: {
             /** Items */
@@ -1283,6 +1309,7 @@ export interface components {
             latest_run?: components["schemas"]["LatestRunSummary"] | null;
             /** Origin */
             origin: string;
+            owner: components["schemas"]["Owner"] | null;
             schedule?: components["schemas"]["ScheduleSummary"] | null;
             /** Title */
             title: string | null;
@@ -1319,6 +1346,7 @@ export interface components {
             id: string;
             /** Origin */
             origin: string;
+            owner: components["schemas"]["Owner"] | null;
             /** Title */
             title: string | null;
             /** Url */
