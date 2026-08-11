@@ -55,14 +55,33 @@ export function UserMenu() {
         )}
         <span className="max-w-32 truncate">{user.displayName}</span>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end">
+      {/* `w-auto` overrides the primitive's default `w-(--radix-dropdown-menu-trigger-width)`
+          (components/ui/dropdown-menu.tsx). Sizing a menu to its trigger is a fine default when the
+          trigger is the widest thing in play; here it is not — the trigger is a display name capped
+          at `max-w-32`, and the menu holds a full email address, which is reliably longer. Pinned
+          to the trigger, the content's `overflow-x-hidden` chopped the address mid-character.
+          `min-w-*` keeps the menu from being narrower than the pill that opened it, and `max-w-*`
+          is Radix's own measurement of the room left before the viewport edge, so a long address
+          cannot push the menu off a 375px screen. */}
+      <DropdownMenuContent
+        align="end"
+        className="w-auto max-w-(--radix-dropdown-menu-content-available-width) min-w-(--radix-dropdown-menu-trigger-width)"
+      >
         {user.email ? (
-          <DropdownMenuLabel className="font-normal text-muted-foreground">
+          // `truncate` is the last resort for an address too long even for the space Radix
+          // measured: an ellipsis reads as "shortened", a hard cut reads as a rendering bug.
+          //
+          // The extra padding is on BOTH rows, not just this one. Widening only the label would
+          // indent the address relative to `Sign out`, and moving it to the menu's own `p-1`
+          // would un-flush the separator, whose `-mx-1` is written against that exact value.
+          <DropdownMenuLabel className="truncate px-2 py-1.5 font-normal text-muted-foreground">
             {user.email}
           </DropdownMenuLabel>
         ) : null}
         <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={handleSignOut}>Sign out</DropdownMenuItem>
+        <DropdownMenuItem className="px-2" onSelect={handleSignOut}>
+          Sign out
+        </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   );
