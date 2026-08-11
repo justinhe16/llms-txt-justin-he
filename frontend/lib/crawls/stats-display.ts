@@ -54,16 +54,16 @@ const dayTickFormatter = new Intl.DateTimeFormat("en-US", {
 /**
  * "Thu, 14:00" — an `hour` bucket's axis tick.
  *
- * The weekday is what makes an hourly tick unambiguous without a date. As of PER-193, `hour`
- * buckets serve **both** the 1d and 7d windows (`internals/stats_window.py`) — 24 buckets or
- * 168 — and this formatter cannot tell which window produced a given point, because it formats
- * from `bucket`, not from `window` (see `formatBucketTick`'s docstring for why that is the
- * rule and must stay the rule). For 1d, the weekday prefix is redundant — it repeats the same
- * word across all 24 ticks — but redundant is the safe failure mode: for 7d, a bare "14:00"
- * would appear seven times on one axis meaning seven different afternoons, which is actively
- * misleading rather than merely repetitive. Do not add a `window` parameter to this formatter
- * (or `hourLabelFormatter`) to special-case 1d — that would require threading `window` through
- * every call site for a cosmetic difference on the shortest, least ambiguous window.
+ * The weekday is what makes an hourly tick unambiguous without a date. `hour` buckets serve
+ * **every** window (`internals/stats_window.py`) — 12, 24 or 72 of them — and this formatter
+ * cannot tell which window produced a given point, because it formats from `bucket`, not from
+ * `window` (see `formatBucketTick`'s docstring for why that is the rule and must stay the
+ * rule). For 12h and 1d the weekday prefix is redundant — it repeats the same word across
+ * every tick — but redundant is the safe failure mode: for 3d, a bare "14:00" would appear
+ * three times on one axis meaning three different afternoons, which is actively misleading
+ * rather than merely repetitive. Do not add a `window` parameter to this formatter (or
+ * `hourLabelFormatter`) to special-case the short ones — that would require threading
+ * `window` through every call site for a cosmetic difference on the least ambiguous windows.
  */
 const hourTickFormatter = new Intl.DateTimeFormat("en-US", {
   timeZone: UTC,
@@ -95,10 +95,11 @@ const hourLabelFormatter = new Intl.DateTimeFormat("en-US", {
  * The short label under one bucket on the x-axis.
  *
  * `bucket` is the API's own `bucket` field and must be passed through from the response —
- * never re-derived from `window`. The mapping happens to be "7d is hourly, everything else is
- * daily" today (`internals/stats_window.py`), but the server is the only thing that knows
- * which buckets it actually aggregated over, and a second copy of that table here is a second
- * thing that can disagree with the data it is labelling.
+ * never re-derived from `window`. The mapping happens to be "every window is hourly" today
+ * (`internals/stats_window.py`), which makes the `day` branch below unreachable — and is
+ * exactly why it stays. The server is the only thing that knows which buckets it actually
+ * aggregated over, a second copy of that table here is a second thing that can disagree with
+ * the data it is labelling, and a window that buckets daily is one row of that table away.
  */
 export function formatBucketTick(iso: string, bucket: StatsBucket): string {
   const parsed = Date.parse(iso);

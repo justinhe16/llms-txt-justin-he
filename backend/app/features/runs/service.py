@@ -1029,7 +1029,7 @@ class RunService:
         is about `_WEBSITE_STATS` specifically and still holds unchanged; `latest_completed_
         index` is a second, `LIMIT 1` lookup added purposefully so the whole `stats` jsonb of
         the newest completed run — samples included — never has to ride every row of the
-        168-bucket aggregate to answer one question only the single newest row can answer.
+        72-bucket aggregate to answer one question only the single newest row can answer.
         See `_LATEST_COMPLETED_INDEX`'s own comment.
 
         Raises:

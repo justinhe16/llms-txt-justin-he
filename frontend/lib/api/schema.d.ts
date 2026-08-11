@@ -1379,7 +1379,7 @@ export interface components {
              * Window
              * @enum {string}
              */
-            window: "1d" | "7d" | "14d";
+            window: "12h" | "1d" | "3d";
         };
     };
     responses: never;
@@ -2087,8 +2087,8 @@ export interface operations {
     get_website_stats_websites__id__stats_get: {
         parameters: {
             query?: {
-                /** @description One of 1d, 7d, 14d; anything else is a 422. */
-                window?: "1d" | "7d" | "14d";
+                /** @description One of 12h, 1d, 3d; anything else is a 422. */
+                window?: "12h" | "1d" | "3d";
             };
             header?: never;
             path: {

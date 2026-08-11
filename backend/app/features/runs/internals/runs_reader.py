@@ -462,7 +462,7 @@ _PREVIOUS_COMPLETED_INDEX: Final = """
 # * `totals` is a separate single-row CTE `CROSS JOIN`ed onto every series row. That returns
 #   both response shapes from one query, and a one-row aggregate always produces a row even
 #   over zero input, so the series is still fully zero-filled for a website with no runs.
-#   Cost is a handful of repeated columns over at most 168 rows.
+#   Cost is a handful of repeated columns over at most 72 rows (the widest window, `3d`).
 # * Deliberately NOT `json_agg`. `to_jsonb(timestamptz)` renders using the session
 #   `TimeZone`, so bucket timestamps would come back offset-rendered rather than UTC, and
 #   asyncpg hands json/jsonb back as `str`, requiring a `json.loads`. Plain columns keep
@@ -631,7 +631,7 @@ _WEBSITE_STATS: Final = """
 # requested window, with its whole `stats` jsonb (samples included). A SEPARATE query rather
 # than a fifth CTE folded into `_WEBSITE_STATS`: doing so would require selecting `r.stats` —
 # the whole jsonb, `index_diff` samples and all — into `scoped` for every run in the window,
-# just to keep the one row this needs. That would cost real bytes on every row of a 168-bucket
+# just to keep the one row this needs. That would cost real bytes on every row of a 72-bucket
 # window to answer a question only the single newest row can answer. `_WEBSITE_STATS` keeps
 # its "touches `runs` exactly once" property (the EXPLAIN test's whole point); this is
 # deliberately a second, `LIMIT 1` index lookup instead, at the modest cost of a second round

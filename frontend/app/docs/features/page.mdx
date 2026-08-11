@@ -190,7 +190,7 @@ still in progress. A "What changed in the latest run" panel names the added, rem
 content-changed and metadata-changed pages. Total runs and success rate sit below all of it,
 in one line rather than as tiles of their own.
 
-A **1d / 7d / 14d** switcher above the panel selects the window. The choice lives in the URL
+A **12h / 1d / 3d** switcher above the panel selects the window. The choice lives in the URL
 (`?window=`), so a link to a specific window reopens exactly that view.
 
 <DocsTable>
@@ -204,29 +204,29 @@ A **1d / 7d / 14d** switcher above the panel selects the window. The choice live
   </thead>
   <tbody>
     <tr>
+      <td>12h</td>
+      <td>last 12 hours</td>
+      <td>hour</td>
+      <td>12</td>
+    </tr>
+    <tr>
       <td>1d</td>
       <td>last 24 hours</td>
       <td>hour</td>
       <td>24</td>
     </tr>
     <tr>
-      <td>7d</td>
-      <td>last 7 days</td>
+      <td>3d</td>
+      <td>last 3 days</td>
       <td>hour</td>
-      <td>168</td>
-    </tr>
-    <tr>
-      <td>14d</td>
-      <td>last 14 days</td>
-      <td>day</td>
-      <td>14</td>
+      <td>72</td>
     </tr>
   </tbody>
 </DocsTable>
 
-7d is the default. Every bucket, in every window, is a UTC hour or a UTC day. The panel says so
-once rather than converting to the reader's own time zone, so a bucket's label always matches
-the instant it covers.
+1d is the default. Every bucket, in every window, is a UTC hour. The panel says so once rather
+than converting to the reader's own time zone, so a bucket's label always matches the instant
+it covers.
 
 Each chart decides its own emptiness. The outcomes chart is empty only when the window has no
 runs at all. The index size and index changes charts can still be empty with runs in the
