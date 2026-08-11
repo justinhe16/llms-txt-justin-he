@@ -577,6 +577,7 @@ class _VanishingWebsiteService:
             title=None,
             enrich_with_llm=False,
             created_at=_NOW,
+            owner=None,
         )
 
 
