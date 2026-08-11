@@ -46,7 +46,7 @@ export function useWebsiteStats(
     enabled: options.enabled,
 
     // Keep the previous window's response on screen while the next one loads, instead of
-    // dropping back to the skeleton. Switching 7d → 14d is a refinement of what is already
+    // dropping back to the skeleton. Switching 1d → 3d is a refinement of what is already
     // being read, and blanking four tiles and three charts for the length of a round trip
     // makes the switcher feel like it reloaded the page. `isFetching` is what the panel
     // dims on meanwhile, so the stale data never claims to be current.

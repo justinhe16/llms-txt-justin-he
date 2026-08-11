@@ -253,7 +253,8 @@ export function IndexSizeChart({ points, bucket, isEmpty }: TimeSeriesProps) {
             stroke="var(--color-indexKb)"
             strokeWidth={2}
             // A visible dot on every point, unlike the deleted `DurationChart`'s `dot={false}`
-            // (168 hourly circles would be noise) — and this is not the same situation.
+            // (a full window of hourly circles would be noise) — and this is not the same
+            // situation.
             // `connectNulls={false}` means an isolated real point, with `null` on both
             // neighbouring buckets, has no line segment to appear as: with `dot={false}` it
             // would render NOTHING at all, silently dropping the one measurement in the

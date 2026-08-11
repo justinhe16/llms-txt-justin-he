@@ -45,14 +45,15 @@ _NOW = datetime.now(UTC)
 # PER-199: a frozen clock for the two tests below that assert on `window.start`/`window.end`
 # THEMSELVES, rather than merely somewhere comfortably inside the window.
 #
-# Every other test in this file that calls `resolve_window("14d", _NOW)` only uses the result
-# to find a bucket well inside the window (`window.start + timedelta(days=3 or 5)`), and stays
+# Every other test in this file that calls `resolve_window("3d", _NOW)` only uses the result
+# to find a bucket well inside the window (`window.start + timedelta(hours=36)`), and stays
 # correct even if the server's own `datetime.now(UTC)` call (`RunService.get_website_stats`,
-# `service.py:1016`) resolves a window shifted by the one day a single UTC-midnight crossing
-# between module-import time and request time can produce — the shifted bucket is still
-# inside the new window either way. The two tests below instead seed AT `window.start` and
-# `window.end` exactly, which is exactly what a one-day shift moves out from under them: one
-# of three seeded days stops being counted (`assert 2 == 3`), or a run seeded exactly at
+# `service.py:1016`) resolves a window shifted by the one bucket a single hour boundary
+# crossed between module-import time and request time can produce — the shifted bucket is
+# still inside the new window either way, with 35 buckets of slack on either side. The two
+# tests below instead seed AT `window.start` and `window.end` exactly, which is exactly what
+# a one-bucket shift moves out from under them: one of three seeded buckets stops being
+# counted (`assert 2 == 3`), or a run seeded exactly at
 # `window.start` lands one bucket outside the server's own, differently-shifted window
 # (`assert 0 == 1`). That was reproduced and reverted while fixing this — see the PR
 # description for the reproduction.
@@ -205,32 +206,32 @@ async def test_seeded_runs_produce_hand_verifiable_aggregates(
     website_id = await seed_website(
         websites_db, TEST_USER_A_ID, "https://stats-hand-verified.example"
     )
-    window = resolve_window("14d", _NOW)
+    window = resolve_window("3d", _NOW)
     # A bucket boundary well inside the window -- not `window.start` itself, so this test
     # exercises an ordinary bucket rather than doubling as the boundary test (see #13 below).
-    target_bucket = window.start + timedelta(days=5)
+    target_bucket = window.start + timedelta(hours=36)
 
     await seed_run(
         websites_db,
         website_id,
-        started_at=target_bucket + timedelta(hours=1),
-        completed_at=target_bucket + timedelta(hours=1, milliseconds=10_000),
+        started_at=target_bucket + timedelta(minutes=10),
+        completed_at=target_bucket + timedelta(minutes=10, milliseconds=10_000),
         status="completed",
         stats={"pages_crawled": 10},
     )
     await seed_run(
         websites_db,
         website_id,
-        started_at=target_bucket + timedelta(hours=2),
-        completed_at=target_bucket + timedelta(hours=2, milliseconds=20_000),
+        started_at=target_bucket + timedelta(minutes=20),
+        completed_at=target_bucket + timedelta(minutes=20, milliseconds=20_000),
         status="completed",
         stats={"pages_crawled": 20},
     )
     await seed_run(
         websites_db,
         website_id,
-        started_at=target_bucket + timedelta(hours=3),
-        completed_at=target_bucket + timedelta(hours=3, milliseconds=30_000),
+        started_at=target_bucket + timedelta(minutes=30),
+        completed_at=target_bucket + timedelta(minutes=30, milliseconds=30_000),
         status="completed",
         stats={"pages_crawled": 30},
     )
@@ -239,18 +240,18 @@ async def test_seeded_runs_produce_hand_verifiable_aggregates(
     await seed_run(
         websites_db,
         website_id,
-        started_at=target_bucket + timedelta(hours=4),
+        started_at=target_bucket + timedelta(minutes=40),
         status="failed",
         completed_at=None,
         stats=None,
     )
 
-    response = await user_client.get(f"/websites/{website_id}/stats", params={"window": "14d"})
+    response = await user_client.get(f"/websites/{website_id}/stats", params={"window": "3d"})
 
     assert response.status_code == 200
     body = response.json()
-    assert body["window"] == "14d"
-    assert body["bucket"] == "day"
+    assert body["window"] == "3d"
+    assert body["bucket"] == "hour"
 
     bucket = _series_bucket(body["series"], target_bucket)
     assert bucket["runs"] == 4
@@ -268,7 +269,7 @@ async def test_seeded_runs_produce_hand_verifiable_aggregates(
     assert totals["success_rate"] == pytest.approx(0.75)
     assert totals["avg_duration_ms"] == 20_000
     assert totals["avg_pages"] == pytest.approx(15.0)
-    assert parse(totals["last_run_at"]) == target_bucket + timedelta(hours=4)
+    assert parse(totals["last_run_at"]) == target_bucket + timedelta(minutes=40)
 
 
 # -----------------------------------------------------------------------------------------
@@ -276,26 +277,26 @@ async def test_seeded_runs_produce_hand_verifiable_aggregates(
 # -----------------------------------------------------------------------------------------
 
 
-async def test_a_14_day_window_with_runs_on_three_days_zero_fills_the_rest(
+async def test_a_3_day_window_with_runs_in_three_buckets_zero_fills_the_rest(
     user_client: AsyncClient, websites_db: Pool, frozen_stats_clock: datetime
 ) -> None:
     """PER-199: uses `frozen_stats_clock` rather than the module-level `_NOW`, because this
     test seeds AT `window.start`/`window.end` themselves — see that fixture's section
     docstring for the flake this closes."""
     website_id = await seed_website(websites_db, TEST_USER_A_ID, "https://stats-sparse.example")
-    window = resolve_window("14d", frozen_stats_clock)
-    active_days = [window.start, window.start + timedelta(days=5), window.end - window.step]
+    window = resolve_window("3d", frozen_stats_clock)
+    active_buckets = [window.start, window.start + timedelta(hours=36), window.end - window.step]
 
-    for day in active_days:
-        await seed_run(websites_db, website_id, started_at=day + timedelta(hours=6))
+    for bucket_start in active_buckets:
+        await seed_run(websites_db, website_id, started_at=bucket_start + timedelta(minutes=6))
 
-    response = await user_client.get(f"/websites/{website_id}/stats", params={"window": "14d"})
+    response = await user_client.get(f"/websites/{website_id}/stats", params={"window": "3d"})
 
     assert response.status_code == 200
     series = response.json()["series"]
-    assert len(series) == 14
+    assert len(series) == 72
 
-    _assert_active_buckets_are_exactly(series, set(active_days))
+    _assert_active_buckets_are_exactly(series, set(active_buckets))
 
     for point in series:
         if point["runs"] == 0:
@@ -319,8 +320,8 @@ async def test_a_website_with_no_runs_returns_zeroed_buckets_and_null_summary(
 
     assert response.status_code == 200
     body = response.json()
-    # The default window is 7d/hour — 168 zeroed buckets.
-    assert len(body["series"]) == 168
+    # The default window is 1d/hour — 24 zeroed buckets.
+    assert len(body["series"]) == 24
     assert all(point["runs"] == 0 for point in body["series"])
 
     totals = body["totals"]
@@ -434,7 +435,11 @@ async def test_in_flight_runs_are_excluded_from_the_duration_average_but_counted
 # -----------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("window", ["30d", "90d", "30", "", "DROP TABLE"])
+# `7d` and `14d` are in this list on purpose: they were valid windows before this set became
+# 12h/1d/3d, so a bookmarked link still carries them. The backend rejects them outright; the
+# frontend never sends one, because `isStatsWindow` (lib/crawls/use-detail-view.ts) falls back
+# to the default before the request is ever built.
+@pytest.mark.parametrize("window", ["7d", "14d", "30d", "90d", "30", "", "DROP TABLE"])
 async def test_an_invalid_window_value_is_422(
     user_client: AsyncClient, websites_db: Pool, window: str
 ) -> None:
@@ -450,7 +455,7 @@ async def test_an_invalid_window_value_is_422(
 # -----------------------------------------------------------------------------------------
 
 
-async def test_default_window_is_7d_and_bucket_is_hour(
+async def test_default_window_is_1d_and_bucket_is_hour(
     user_client: AsyncClient, websites_db: Pool
 ) -> None:
     website_id = await seed_website(
@@ -461,9 +466,21 @@ async def test_default_window_is_7d_and_bucket_is_hour(
 
     assert response.status_code == 200
     body = response.json()
-    assert body["window"] == "7d"
+    assert body["window"] == "1d"
     assert body["bucket"] == "hour"
-    assert len(body["series"]) == 168
+    assert len(body["series"]) == 24
+
+
+async def test_12h_returns_12_hourly_buckets(user_client: AsyncClient, websites_db: Pool) -> None:
+    website_id = await seed_website(websites_db, TEST_USER_A_ID, "https://stats-12h.example")
+
+    response = await user_client.get(f"/websites/{website_id}/stats", params={"window": "12h"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["window"] == "12h"
+    assert body["bucket"] == "hour"
+    assert len(body["series"]) == 12
 
 
 async def test_1d_returns_24_hourly_buckets(user_client: AsyncClient, websites_db: Pool) -> None:
@@ -478,28 +495,16 @@ async def test_1d_returns_24_hourly_buckets(user_client: AsyncClient, websites_d
     assert len(body["series"]) == 24
 
 
-async def test_7d_returns_168_hourly_buckets(user_client: AsyncClient, websites_db: Pool) -> None:
-    website_id = await seed_website(websites_db, TEST_USER_A_ID, "https://stats-7d.example")
+async def test_3d_returns_72_hourly_buckets(user_client: AsyncClient, websites_db: Pool) -> None:
+    website_id = await seed_website(websites_db, TEST_USER_A_ID, "https://stats-3d.example")
 
-    response = await user_client.get(f"/websites/{website_id}/stats", params={"window": "7d"})
+    response = await user_client.get(f"/websites/{website_id}/stats", params={"window": "3d"})
 
     assert response.status_code == 200
     body = response.json()
-    assert body["window"] == "7d"
+    assert body["window"] == "3d"
     assert body["bucket"] == "hour"
-    assert len(body["series"]) == 168
-
-
-async def test_14d_returns_14_daily_buckets(user_client: AsyncClient, websites_db: Pool) -> None:
-    website_id = await seed_website(websites_db, TEST_USER_A_ID, "https://stats-14d.example")
-
-    response = await user_client.get(f"/websites/{website_id}/stats", params={"window": "14d"})
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["window"] == "14d"
-    assert body["bucket"] == "day"
-    assert len(body["series"]) == 14
+    assert len(body["series"]) == 72
 
 
 # -----------------------------------------------------------------------------------------
@@ -549,12 +554,12 @@ async def test_a_run_exactly_at_window_start_is_counted_one_microsecond_earlier_
     test seeds AT `window.start` itself — see that fixture's section docstring for the flake
     this closes."""
     website_id = await seed_website(websites_db, TEST_USER_A_ID, "https://stats-boundary.example")
-    window = resolve_window("14d", frozen_stats_clock)
+    window = resolve_window("3d", frozen_stats_clock)
 
     await seed_run(websites_db, website_id, started_at=window.start)
     await seed_run(websites_db, website_id, started_at=window.start - timedelta(microseconds=1))
 
-    response = await user_client.get(f"/websites/{website_id}/stats", params={"window": "14d"})
+    response = await user_client.get(f"/websites/{website_id}/stats", params={"window": "3d"})
 
     assert response.status_code == 200
     body = response.json()
@@ -607,27 +612,27 @@ async def test_series_reports_pages_added_and_removed_from_the_diff_block(
     website_id = await seed_website(
         websites_db, TEST_USER_A_ID, "https://stats-diff-series.example"
     )
-    window = resolve_window("14d", _NOW)
-    target_bucket = window.start + timedelta(days=3)
+    window = resolve_window("3d", _NOW)
+    target_bucket = window.start + timedelta(hours=36)
 
     await seed_run(
         websites_db,
         website_id,
-        started_at=target_bucket + timedelta(hours=1),
-        completed_at=target_bucket + timedelta(hours=1, seconds=1),
+        started_at=target_bucket + timedelta(minutes=10),
+        completed_at=target_bucket + timedelta(minutes=10, seconds=1),
         status="completed",
         stats=_stats_with_diff(index_diff=_compared_diff(pages_added=3, pages_removed=1)),
     )
     await seed_run(
         websites_db,
         website_id,
-        started_at=target_bucket + timedelta(hours=2),
-        completed_at=target_bucket + timedelta(hours=2, seconds=1),
+        started_at=target_bucket + timedelta(minutes=20),
+        completed_at=target_bucket + timedelta(minutes=20, seconds=1),
         status="completed",
         stats=_stats_with_diff(index_diff=_compared_diff(pages_added=2, pages_removed=4)),
     )
 
-    response = await user_client.get(f"/websites/{website_id}/stats", params={"window": "14d"})
+    response = await user_client.get(f"/websites/{website_id}/stats", params={"window": "3d"})
 
     assert response.status_code == 200
     body = response.json()
@@ -646,27 +651,27 @@ async def test_index_size_is_the_last_completed_run_in_the_bucket_not_the_max(
     """A `max()` implementation would report the LARGER of the two — 5000 bytes / 50 pages —
     which is exactly wrong the moment a site's index shrinks between two runs in one bucket."""
     website_id = await seed_website(websites_db, TEST_USER_A_ID, "https://stats-index-size.example")
-    window = resolve_window("14d", _NOW)
-    target_bucket = window.start + timedelta(days=3)
+    window = resolve_window("3d", _NOW)
+    target_bucket = window.start + timedelta(hours=36)
 
     await seed_run(
         websites_db,
         website_id,
-        started_at=target_bucket + timedelta(hours=1),
-        completed_at=target_bucket + timedelta(hours=1, seconds=1),
+        started_at=target_bucket + timedelta(minutes=10),
+        completed_at=target_bucket + timedelta(minutes=10, seconds=1),
         status="completed",
         stats=_stats_with_diff(links_emitted=50, llms_txt_bytes=5_000, index_diff=None),
     )
     await seed_run(
         websites_db,
         website_id,
-        started_at=target_bucket + timedelta(hours=2),
-        completed_at=target_bucket + timedelta(hours=2, seconds=1),
+        started_at=target_bucket + timedelta(minutes=20),
+        completed_at=target_bucket + timedelta(minutes=20, seconds=1),
         status="completed",
         stats=_stats_with_diff(links_emitted=10, llms_txt_bytes=900, index_diff=None),
     )
 
-    response = await user_client.get(f"/websites/{website_id}/stats", params={"window": "14d"})
+    response = await user_client.get(f"/websites/{website_id}/stats", params={"window": "3d"})
 
     assert response.status_code == 200
     bucket = _series_bucket(response.json()["series"], target_bucket)
@@ -685,19 +690,19 @@ async def test_a_pre_version_13_row_reports_links_emitted_alone_as_index_pages(
     website_id = await seed_website(
         websites_db, TEST_USER_A_ID, "https://stats-pre-v13-index.example"
     )
-    window = resolve_window("14d", _NOW)
-    target_bucket = window.start + timedelta(days=3)
+    window = resolve_window("3d", _NOW)
+    target_bucket = window.start + timedelta(hours=36)
 
     await seed_run(
         websites_db,
         website_id,
-        started_at=target_bucket + timedelta(hours=1),
-        completed_at=target_bucket + timedelta(hours=1, seconds=1),
+        started_at=target_bucket + timedelta(minutes=10),
+        completed_at=target_bucket + timedelta(minutes=10, seconds=1),
         status="completed",
         stats=_stats_with_diff(links_emitted=12, llms_txt_bytes=1_200, index_diff=None),
     )
 
-    response = await user_client.get(f"/websites/{website_id}/stats", params={"window": "14d"})
+    response = await user_client.get(f"/websites/{website_id}/stats", params={"window": "3d"})
 
     assert response.status_code == 200
     bucket = _series_bucket(response.json()["series"], target_bucket)
@@ -711,21 +716,21 @@ async def test_a_version_13_row_sums_main_and_optional_links_as_index_pages(
     `index_pages` is the SUM — the tile keeps its "pages in the artifact" meaning even though
     some of them now render under `## Optional` rather than the main body."""
     website_id = await seed_website(websites_db, TEST_USER_A_ID, "https://stats-v13-index.example")
-    window = resolve_window("14d", _NOW)
-    target_bucket = window.start + timedelta(days=3)
+    window = resolve_window("3d", _NOW)
+    target_bucket = window.start + timedelta(hours=36)
 
     await seed_run(
         websites_db,
         website_id,
-        started_at=target_bucket + timedelta(hours=1),
-        completed_at=target_bucket + timedelta(hours=1, seconds=1),
+        started_at=target_bucket + timedelta(minutes=10),
+        completed_at=target_bucket + timedelta(minutes=10, seconds=1),
         status="completed",
         stats=_stats_with_diff(
             links_emitted=12, links_optional=5, llms_txt_bytes=1_200, index_diff=None
         ),
     )
 
-    response = await user_client.get(f"/websites/{website_id}/stats", params={"window": "14d"})
+    response = await user_client.get(f"/websites/{website_id}/stats", params={"window": "3d"})
 
     assert response.status_code == 200
     bucket = _series_bucket(response.json()["series"], target_bucket)
@@ -738,19 +743,19 @@ async def test_a_bucket_with_no_completed_run_reports_null_index_size_not_zero(
     """The headline null-vs-zero assertion: a bucket with a run that never completed has no
     known index size, and that must render as `null`, never `0`."""
     website_id = await seed_website(websites_db, TEST_USER_A_ID, "https://stats-null-index.example")
-    window = resolve_window("14d", _NOW)
-    target_bucket = window.start + timedelta(days=3)
+    window = resolve_window("3d", _NOW)
+    target_bucket = window.start + timedelta(hours=36)
 
     await seed_run(
         websites_db,
         website_id,
-        started_at=target_bucket + timedelta(hours=1),
+        started_at=target_bucket + timedelta(minutes=10),
         status="failed",
         completed_at=None,
         stats=None,
     )
 
-    response = await user_client.get(f"/websites/{website_id}/stats", params={"window": "14d"})
+    response = await user_client.get(f"/websites/{website_id}/stats", params={"window": "3d"})
 
     assert response.status_code == 200
     bucket = _series_bucket(response.json()["series"], target_bucket)
@@ -766,20 +771,20 @@ async def test_a_run_without_a_diff_block_contributes_zero_added_and_is_not_coun
     user_client: AsyncClient, websites_db: Pool
 ) -> None:
     website_id = await seed_website(websites_db, TEST_USER_A_ID, "https://stats-v5-row.example")
-    window = resolve_window("14d", _NOW)
-    target_bucket = window.start + timedelta(days=3)
+    window = resolve_window("3d", _NOW)
+    target_bucket = window.start + timedelta(hours=36)
 
     version_5_stats = {"pages_crawled": 1, "links_emitted": 1, "version": 5}
     await seed_run(
         websites_db,
         website_id,
-        started_at=target_bucket + timedelta(hours=1),
-        completed_at=target_bucket + timedelta(hours=1, seconds=1),
+        started_at=target_bucket + timedelta(minutes=10),
+        completed_at=target_bucket + timedelta(minutes=10, seconds=1),
         status="completed",
         stats=version_5_stats,
     )
 
-    response = await user_client.get(f"/websites/{website_id}/stats", params={"window": "14d"})
+    response = await user_client.get(f"/websites/{website_id}/stats", params={"window": "3d"})
 
     assert response.status_code == 200
     bucket = _series_bucket(response.json()["series"], target_bucket)
@@ -800,19 +805,19 @@ async def test_a_failed_run_carrying_a_diff_block_is_excluded_from_the_series(
     website_id = await seed_website(
         websites_db, TEST_USER_A_ID, "https://stats-failed-diff.example"
     )
-    window = resolve_window("14d", _NOW)
-    target_bucket = window.start + timedelta(days=3)
+    window = resolve_window("3d", _NOW)
+    target_bucket = window.start + timedelta(hours=36)
 
     await seed_run(
         websites_db,
         website_id,
-        started_at=target_bucket + timedelta(hours=1),
-        completed_at=target_bucket + timedelta(hours=1, seconds=1),
+        started_at=target_bucket + timedelta(minutes=10),
+        completed_at=target_bucket + timedelta(minutes=10, seconds=1),
         status="failed",
         stats=_stats_with_diff(index_diff=_compared_diff(pages_added=100, pages_removed=100)),
     )
 
-    response = await user_client.get(f"/websites/{website_id}/stats", params={"window": "14d"})
+    response = await user_client.get(f"/websites/{website_id}/stats", params={"window": "3d"})
 
     assert response.status_code == 200
     bucket = _series_bucket(response.json()["series"], target_bucket)
@@ -1106,9 +1111,9 @@ async def test_a_malformed_index_diff_does_not_500_and_reports_not_recorded(
 # Deliberately a LONG, SPARSE history (~20k rows spread over roughly a decade) rather than
 # `test_runs_api.py`'s dense, recent one: that suite's keyset query pages through "this
 # website's whole history" and wants most of a shallow scan to matter, so a dense recent
-# fixture is the right shape for it. This query's WHERE is a 14-day date range, and the claim
+# fixture is the right shape for it. This query's WHERE is a 3-day date range, and the claim
 # under test is that such a narrow, *selective* range rides the index rather than being
-# scanned sequentially — which only reproduces if the 14-day window is actually a small slice
+# scanned sequentially — which only reproduces if the 3-day window is actually a small slice
 # of the table. A dense recent history would make Postgres correctly prefer a Seq Scan, and a
 # test asserting an index scan against that fixture would just be asserting the cost model,
 # not this query's behavior.
@@ -1116,14 +1121,14 @@ async def test_a_malformed_index_diff_does_not_500_and_reports_not_recorded(
 
 _EXPLAIN_ROW_COUNT = 20_000
 # ~10 years of history spread evenly across _EXPLAIN_ROW_COUNT rows: 10 * 365 * 86_400
-# seconds, divided by the row count, rounded to a whole number of seconds. A 14-day window
-# against this fixture covers roughly 14 / 3650 ≈ 0.38% of the table.
+# seconds, divided by the row count, rounded to a whole number of seconds. A 3-day window
+# against this fixture covers roughly 3 / 3650 ≈ 0.08% of the table.
 _EXPLAIN_STEP_SECONDS = (10 * 365 * 86_400) // _EXPLAIN_ROW_COUNT
 
 
 async def _seed_long_sparse_history_for_explain(pool: Pool, website_id: UUID) -> None:
     """Bulk-insert `_EXPLAIN_ROW_COUNT` rows in one round trip, evenly spread across roughly
-    a decade ending now, so a 14-day window from `resolve_window` is a small, highly
+    a decade ending now, so a 3-day window from `resolve_window` is a small, highly
     selective slice of the table. See the section docstring above for why this fixture is
     sparse rather than dense, unlike `test_runs_api.py`'s.
     """
@@ -1181,7 +1186,7 @@ async def test_stats_query_plan_avoids_a_seq_scan_and_touches_runs_exactly_once(
 ) -> None:
     website_id = await seed_website(websites_db, TEST_USER_A_ID, "https://stats-explain.example")
     await _seed_long_sparse_history_for_explain(websites_db, website_id)
-    window = resolve_window("14d", _NOW)
+    window = resolve_window("3d", _NOW)
 
     plan = await explain_plan(
         websites_db,
@@ -1198,13 +1203,13 @@ async def test_stats_query_plan_avoids_a_seq_scan_and_touches_runs_exactly_once(
 
 async def test_latest_completed_index_query_plan_avoids_a_seq_scan(websites_db: Pool) -> None:
     """`_LATEST_COMPLETED_INDEX`'s own EXPLAIN test, mirroring the one above — a `LIMIT 1`
-    keyset lookup against the same sparse fixture, over the same 14-day window, must not fall
+    keyset lookup against the same sparse fixture, over the same 3-day window, must not fall
     back to a sequential scan of the table."""
     website_id = await seed_website(
         websites_db, TEST_USER_A_ID, "https://stats-latest-explain.example"
     )
     await _seed_long_sparse_history_for_explain(websites_db, website_id)
-    window = resolve_window("14d", _NOW)
+    window = resolve_window("3d", _NOW)
 
     plan = await explain_plan(
         websites_db, _LATEST_COMPLETED_INDEX, website_id, window.start, window.end

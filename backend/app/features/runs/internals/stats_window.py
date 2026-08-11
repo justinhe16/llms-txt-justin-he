@@ -20,9 +20,14 @@ for the three names that literal admits.
 
 | window | bucket | step   | bucket_count |
 | ------ | ------ | ------ | ------------ |
+| `12h`  | `hour` | 1 hour | 12           |
 | `1d`   | `hour` | 1 hour | 24           |
-| `7d`   | `hour` | 1 hour | 168          |
-| `14d`  | `day`  | 1 day  | 14           |
+| `3d`   | `hour` | 1 hour | 72           |
+
+All three currently bucket hourly, so `_truncate`'s `day` branch and `StatsBucketName`'s
+`"day"` are unexercised. Both stay: the bucket is DATA in `_WINDOWS`, so a longer, daily
+window is one row here rather than a change to this function, its response schema, and the
+generated frontend client.
 
 **Boundary arithmetic**, all in UTC (`now` is converted with `.astimezone(UTC)` first, so a
 caller in any offset gets the same buckets a UTC clock would):
@@ -79,9 +84,9 @@ class _WindowSpec:
 
 
 _WINDOWS: Final[dict[StatsWindowName, _WindowSpec]] = {
+    "12h": _WindowSpec(bucket="hour", step=timedelta(hours=1), bucket_count=12),
     "1d": _WindowSpec(bucket="hour", step=timedelta(hours=1), bucket_count=24),
-    "7d": _WindowSpec(bucket="hour", step=timedelta(hours=1), bucket_count=168),
-    "14d": _WindowSpec(bucket="day", step=timedelta(days=1), bucket_count=14),
+    "3d": _WindowSpec(bucket="hour", step=timedelta(hours=1), bucket_count=72),
 }
 
 

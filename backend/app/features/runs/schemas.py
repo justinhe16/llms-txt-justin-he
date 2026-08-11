@@ -36,7 +36,12 @@ RunTriggerName = Literal["manual", "scheduled"]
 # buckets on. Both `Literal`, not `enum.Enum`, for the same reason as the two above: it
 # renders as an OpenAPI enum and an unrecognized value is a 422 that names the valid options.
 # See `app.features.runs.internals.stats_window` for the window -> bucket -> step mapping.
-StatsWindowName = Literal["1d", "7d", "14d"]
+#
+# `day` is currently unreachable — all three windows are short enough to bucket hourly. It
+# stays in the literal because `resolve_window` is table-driven: a longer window is a row in
+# `_WINDOWS`, not a code change, and deleting `day` would make that row a schema change and a
+# regenerated client instead.
+StatsWindowName = Literal["12h", "1d", "3d"]
 StatsBucketName = Literal["hour", "day"]
 
 

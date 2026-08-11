@@ -95,8 +95,8 @@ const schedules = {
 // what is true: these are two resources that happen to be about the same underlying rows.
 //
 // `window` is part of the key for the same reason `include` is part of `websites.list` —
-// `?window=1d` and `?window=14d` are different responses with different `bucket` fields and
-// different series lengths, and one key for both would let a switch to 14d render 1d's
+// `?window=12h` and `?window=3d` are different responses with different `bucket` fields and
+// different series lengths, and one key for both would let a switch to 3d render 12h's
 // hourly buckets under day labels until the refetch landed.
 const stats = {
   detail: (websiteId: string, window: StatsWindow) =>
