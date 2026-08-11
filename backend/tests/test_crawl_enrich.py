@@ -28,6 +28,8 @@ from conftest import (
 from app.core.settings import Settings
 from app.features.crawl.internals import enrich
 from app.features.crawl.internals.enrich import (
+    _CONTEXT_GUIDANCE,
+    _METADATA_MAX_CHARS,
     _SUMMARY_SCHEMA,
     MAX_TOKENS,
     MODEL,
@@ -109,8 +111,26 @@ async def test_the_request_is_pinned_to_the_documented_shape() -> None:
     assert kwargs["model"] == MODEL == "claude-haiku-4-5"
     assert kwargs["max_tokens"] == MAX_TOKENS == 100
     assert kwargs["temperature"] == TEMPERATURE == 0.3
-    assert kwargs["system"] == PROMPT
-    assert kwargs["messages"] == [{"role": "user", "content": "Some real content for the page."}]
+    # Two system blocks, in this order: `PROMPT` pinned verbatim, then the input-describing
+    # guidance. Asserting on the list — not on a concatenation — is what makes a reword of
+    # `PROMPT` fail here instead of passing because the bytes still appear somewhere.
+    assert kwargs["system"] == [
+        {"type": "text", "text": PROMPT},
+        {"type": "text", "text": _CONTEXT_GUIDANCE},
+    ]
+    assert kwargs["messages"] == [
+        {
+            "role": "user",
+            "content": (
+                "URL: https://example.test/pinned\n"
+                "Title the page gives itself: Extracted Title\n"
+                "Description the page gives itself: An extracted description.\n"
+                "\n"
+                "Extracted page content:\n"
+                "Some real content for the page."
+            ),
+        }
+    ]
     assert kwargs["output_config"] == {"format": {"type": "json_schema", "schema": _SUMMARY_SCHEMA}}
 
     # `effort` exists in the SDK's own `OutputConfigParam` TypedDict but errors on Haiku
@@ -138,8 +158,157 @@ async def test_markdown_is_stripped_then_truncated_to_the_configured_length() ->
 
     assert len(fake.calls) == 1
     sent = fake.calls[0]["messages"][0]["content"]
-    assert sent == "x" * 10
-    assert len(sent) == 10
+    body = sent.split("Extracted page content:\n", 1)[1]
+    assert body == "x" * 10
+    assert len(body) == 10
+    # The cut bounds the BODY, never the whole turn — the URL and the page's own metadata are
+    # not competing with the content for `crawl_enrich_max_chars`.
+    assert sent.startswith("URL: https://example.test/long\n")
+    assert "Title the page gives itself: Extracted Title" in sent
+
+
+# -----------------------------------------------------------------------------------------
+# What the user turn carries beyond the body: the page's URL, and the title and description
+# the page published about itself. A page's own metadata is the only thing in a request that
+# describes the page from outside its extracted content, which is exactly why it is there.
+# -----------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("title", "description"),
+    [
+        (None, None),
+        ("Only A Title", None),
+        (None, "Only a description."),
+        ("", "   "),
+    ],
+)
+async def test_absent_metadata_is_omitted_rather_than_sent_as_an_empty_label(
+    title: str | None, description: str | None
+) -> None:
+    """A page with no `<title>`, no meta description, or a blank one sends neither an empty
+    label nor the string `None` — a label with nothing after it is worse than no label, because
+    it asserts the site said something it did not."""
+    page = _page(
+        "https://example.test/bare",
+        markdown="Real body text.",
+        title=title,
+        description=description,
+    )
+    fake = FakeAnthropic()
+
+    await enrich_pages(fake, [page], settings=_settings())
+
+    sent = fake.calls[0]["messages"][0]["content"]
+    assert "None" not in sent
+    if title is None or not title.strip():
+        assert "Title the page gives itself:" not in sent
+    else:
+        assert f"Title the page gives itself: {title}" in sent
+    if description is None or not description.strip():
+        assert "Description the page gives itself:" not in sent
+    else:
+        assert f"Description the page gives itself: {description}" in sent
+    # Whatever else is or isn't there, the URL and the body always are.
+    assert sent.startswith("URL: https://example.test/bare\n")
+    assert sent.endswith("Extracted page content:\nReal body text.")
+
+
+async def test_long_metadata_is_bounded_independently_of_the_body() -> None:
+    """`internals/extract.py` bounds neither field, so a document can claim a 10,000-character
+    title. `_METADATA_MAX_CHARS` cuts it to what `internals/llms_txt.py` would keep anyway, and
+    does so WITHOUT eating into the body's own `crawl_enrich_max_chars` allowance."""
+    page = _page(
+        "https://example.test/verbose",
+        markdown="y" * 4000,
+        title="t" * 10_000,
+        description="d" * 10_000,
+    )
+    fake = FakeAnthropic()
+
+    await enrich_pages(fake, [page], settings=_settings(crawl_enrich_max_chars=4000))
+
+    sent = fake.calls[0]["messages"][0]["content"]
+    assert f"Title the page gives itself: {'t' * _METADATA_MAX_CHARS}\n" in sent
+    assert f"Description the page gives itself: {'d' * _METADATA_MAX_CHARS}\n" in sent
+    assert sent.endswith("y" * 4000)
+
+
+async def test_metadata_precedes_the_body_in_the_turn() -> None:
+    """Order is load-bearing, not cosmetic: the model reads what the site says about itself
+    before it reads whatever survived extraction, and the truncatable field sits last so a cut
+    cannot take a later field with it."""
+    page = _page("https://example.test/order", markdown="Body sentence.")
+    fake = FakeAnthropic()
+
+    await enrich_pages(fake, [page], settings=_settings())
+
+    sent = fake.calls[0]["messages"][0]["content"]
+    assert sent.index("URL:") < sent.index("Title the page gives itself:")
+    assert sent.index("Title the page gives itself:") < sent.index(
+        "Description the page gives itself:"
+    )
+    assert sent.index("Description the page gives itself:") < sent.index("Extracted page content:")
+
+
+async def test_a_banner_only_body_is_sent_alongside_the_page_s_real_metadata() -> None:
+    """The regression this input shape exists for, in the shape `www.wikipedia.org` actually
+    had: a page whose extracted body is 100% site-wide fundraising chrome, because its real
+    content is a language link grid that `internals/extract.py` correctly discards as
+    navigation — while its own `<title>` and meta description say precisely what the page is.
+
+    Before this ticket a request carried the banner and nothing else, and `claude-haiku-4-5`
+    faithfully described a donation appeal. This asserts only what this module controls: that
+    both sources reach the model. What the model then does with them is the model's, and
+    `_CONTEXT_GUIDANCE` is the instruction that tells it which to trust.
+    """
+    banner = (
+        "You deserve an explanation, so please don't skip this 1-minute read. Our fundraiser "
+        "won't last long, and we need some help to reach our goal. Less than 2% of our readers "
+        "donate, but if everyone who saw this message gave $2.75, we'd hit our goal in a few "
+        "hours."
+    )
+    page = _page(
+        "https://www.wikipedia.org/",
+        markdown=banner,
+        title="Wikipedia, the free encyclopedia",
+        description=(
+            "Wikipedia is a free online encyclopedia, created and edited by volunteers around "
+            "the world and hosted by the Wikimedia Foundation."
+        ),
+    )
+    fake = FakeAnthropic()
+
+    await enrich_pages(fake, [page], settings=_settings())
+
+    sent = fake.calls[0]["messages"][0]["content"]
+    assert "Title the page gives itself: Wikipedia, the free encyclopedia" in sent
+    assert "Description the page gives itself: Wikipedia is a free online encyclopedia" in sent
+    assert banner in sent
+    # And the guidance that names this exact failure mode rides along with it.
+    assert "chrome" in fake.calls[0]["system"][1]["text"]
+
+
+async def test_an_empty_body_still_skips_the_request_even_with_usable_metadata() -> None:
+    """The emptiness check stays on the BODY, not on the rendered turn — which is now non-empty
+    for a page with a title, so the distinction became testable rather than theoretical. A
+    JavaScript shell has a real `<title>` and no content anyone has seen; asking for a
+    description of it would be asking the model to invent one."""
+    page = _page(
+        "https://example.test/shell",
+        markdown="   ",
+        is_empty=True,
+        title="A Real Title From A Real Shell",
+        description="A real meta description.",
+    )
+    fake = FakeAnthropic()
+
+    result = await enrich_pages(fake, [page], settings=_settings())
+
+    assert fake.calls == []
+    assert result.summaries == {}
+    # Skipped for want of a body is not a failure to summarize — see `EnrichmentResult.failures`.
+    assert result.failures == 0
 
 
 # -----------------------------------------------------------------------------------------
@@ -172,7 +341,7 @@ async def test_a_single_pages_api_error_falls_back_and_the_others_still_succeed(
     failing_page = _page("https://example.test/fails", markdown="This page fails to summarize.")
 
     def respond(kwargs: dict[str, Any]) -> FakeAnthropicResponse:
-        if kwargs["messages"][0]["content"] == failing_page.markdown:
+        if failing_page.markdown in kwargs["messages"][0]["content"]:
             raise _connection_error("connection reset")
         return fake_summary_response("A Title", "A short description of the page.")
 
