@@ -101,6 +101,35 @@ class UpdateWebsiteRequest(BaseModel):
     enrich_with_llm: bool = Field(..., description=_ENRICH_WITH_LLM_DESCRIPTION)
 
 
+class Owner(BaseModel):
+    """The resolved identity behind a website's `user_id`, read from Supabase Auth.
+
+    `websites_reader.py`'s `_GET_BY_ID`, `_LIST_ALL`, and `_LIST_WITH_LATEST_RUN` each
+    `LEFT JOIN auth.users` to produce the five named `raw_user_meta_data` keys this model is
+    built from (`service.py`'s `_owner_from_row`) — the same fields, and the same two
+    fallback chains (`user_name` then `preferred_username` for `handle`; `full_name` then
+    `name` for `display_name`), that `frontend/lib/auth/use-user.ts` already reads for the
+    *signed-in* user alone. This is what lets everyone else's row be named the same way
+    instead of falling back to a bare id.
+
+    **Never carries an email.** Reads on this feature are unscoped (ARCHITECTURE.md
+    §4.1 — every signed-in user reads every website), so a field here that leaked an email
+    would hand every user's address to every other signed-in user on the next `GET
+    /websites`. `websites_reader.py`'s `_OWNER_COLUMNS` selects five named keys and nothing
+    else; this model has three fields and nothing else; keep it that way.
+    """
+
+    handle: str | None
+    """`user_name`, falling back to `preferred_username`. `None` when neither is set — a
+    sign-in path with no GitHub metadata at all, for instance the local dev password flow."""
+
+    display_name: str | None
+    """`full_name`, falling back to `name`. `None` under the same condition as `handle`."""
+
+    avatar_url: str | None
+    """The GitHub avatar URL, or `None` if the owner's metadata carries none."""
+
+
 class WebsiteResponse(BaseModel):
     """One website, as every endpoint in this feature returns it.
 
@@ -118,6 +147,13 @@ class WebsiteResponse(BaseModel):
     title: str | None
     enrich_with_llm: bool
     created_at: datetime
+    owner: Owner | None
+    """`None` at the TOP LEVEL — not three individually-null fields wrapped in an object —
+    when the owner has no row in `auth.users` at all, or has one with none of `Owner`'s three
+    fields set. That is what lets a caller with no metadata whatsoever be represented as
+    `owner: null` rather than `{"handle": null, "display_name": null, "avatar_url": null}`,
+    which would read as "we looked and found nothing" when the honest answer is "we have
+    nothing to show." See `service.py`'s `_owner_from_row` for where that collapse happens."""
 
 
 class LatestRunSummary(BaseModel):

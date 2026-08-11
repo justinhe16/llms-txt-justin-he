@@ -11,7 +11,6 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { Installation, Publication, PublishMode } from "@/lib/api/publish";
-import { ownerIdentity } from "@/lib/crawls/owner";
 import { publishStatusCopy, PUBLISH_NEXT_STEPS } from "@/lib/crawls/publish-copy";
 import { useDeletePublishTarget } from "@/lib/query/use-delete-publish-target";
 import { useDisconnectInstallation } from "@/lib/query/use-disconnect-installation";
@@ -72,12 +71,15 @@ import { RelativeTime } from "./relative-time";
  */
 export function PublishPanel({
   websiteId,
-  ownerUserId,
+  ownerLabel,
   isOwner,
 }: {
   websiteId: string;
-  /** `null` while the website query is still resolving. */
-  ownerUserId: string | null;
+  /** The owner's resolved identity — `@handle`, a display name, or a short id fallback,
+   * never "you" (`website-detail.tsx`'s `ownerLabel`, via `lib/crawls/owner.ts`'s
+   * `ownerIdentity`) — for the "Only the owner (…) can …" copy below. `null` while the
+   * website query is still resolving. */
+  ownerLabel: string | null;
   isOwner: boolean;
 }) {
   const installations = useInstallations();
@@ -89,9 +91,9 @@ export function PublishPanel({
   // only reason this panel is ever inert, so there is one branch rather than a precedence list.
   const disabledReason = isOwner
     ? null
-    : ownerUserId === null
+    : ownerLabel === null
       ? "Only the owner can change this."
-      : `Only the owner (${ownerIdentity(ownerUserId, null).label}) can change this.`;
+      : `Only the owner (${ownerLabel}) can change this.`;
 
   const connected = installations.data ?? [];
 

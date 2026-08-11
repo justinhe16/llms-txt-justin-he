@@ -4,14 +4,18 @@ import { Play, RefreshCw } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { ownerIdentity } from "@/lib/crawls/owner";
 import { useTriggerRun } from "@/lib/query/use-trigger-run";
 
 type RunNowButtonProps = {
   websiteId: string;
-  /** The website's owner. Compared against the signed-in user by the parent, which already
-   * has both — this component is told the answer rather than resolving identity itself. */
-  ownerUserId: string;
+  /** The owner's resolved identity — `@handle`, a display name, or a short id fallback,
+   * never "you" (`website-detail.tsx`'s `ownerLabel`, via `lib/crawls/owner.ts`'s
+   * `ownerIdentity`) — for the disabled tooltip below. Compared against the signed-in user
+   * by the parent, which already has both, so this component is told the answer rather than
+   * resolving identity itself. `null` only while the parent's own website query is still
+   * resolving — see `ScheduleTab`/`EnrichmentPanel`/`PublishPanel` for the same allowance,
+   * even though in practice `WebsiteDetail` never renders this button before that resolves. */
+  ownerLabel: string | null;
   isOwner: boolean;
   /** Whether this website already has a `pending`/`processing` run. Derived by the parent
    * from the run history it is already polling (`anyRunActive`), so this component adds no
@@ -48,7 +52,7 @@ type RunNowButtonProps = {
  */
 export function RunNowButton({
   websiteId,
-  ownerUserId,
+  ownerLabel,
   isOwner,
   hasActiveRun,
   onShowRun,
@@ -69,7 +73,9 @@ export function RunNowButton({
   // Ordered by precedence, matching the `disabled` expression above: ownership is checked
   // first because it is the only reason that will not resolve on its own.
   const disabledReason = !isOwner
-    ? `Only the owner (${ownerIdentity(ownerUserId, null).label}) can start a run.`
+    ? ownerLabel === null
+      ? "Only the owner can start a run."
+      : `Only the owner (${ownerLabel}) can start a run.`
     : hasActiveRun
       ? "A run is already in progress. It will finish on its own."
       : isSubmitting

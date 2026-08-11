@@ -126,7 +126,7 @@ export function CrawlsTable({
               </TableCell>
 
               <TableCell className="px-3">
-                <CrawlOwner userId={website.user_id} />
+                <CrawlOwner userId={website.user_id} owner={website.owner} />
               </TableCell>
             </TableRow>
           );

@@ -25,6 +25,12 @@ import { api } from "./fetcher";
 export type Website = components["schemas"]["WebsiteResponse"];
 export type WebsiteListItem = components["schemas"]["WebsiteListItemResponse"];
 export type LatestRun = components["schemas"]["LatestRunSummary"];
+// `Website.owner` / `WebsiteListItem.owner` — the real GitHub identity behind `user_id`,
+// resolved server-side from `auth.users` (`backend/app/features/websites/schemas.py`'s
+// `Owner`, joined in by `websites_reader.py`'s `_OWNER_JOIN`). `null` at the top level for
+// an owner with no usable Supabase Auth metadata; see `lib/crawls/owner.ts` for how the
+// Owner column turns this into a rendered pill.
+export type Owner = components["schemas"]["Owner"];
 // Named `ScheduleSummary`, not `Schedule` — this is the compact fold `GET
 // /websites?include=latest_run` embeds in each row (enough to render "every 6 hours, next
 // at 14:00"), a genuinely smaller type than the full schedule `lib/api/schedules.ts` owns

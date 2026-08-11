@@ -41,6 +41,7 @@ from app.features.websites.internals.websites_writer import WebsitesWriter
 from app.features.websites.schemas import (
     CreateWebsiteRequest,
     LatestRunSummary,
+    Owner,
     ScheduleSummary,
     UpdateWebsiteRequest,
     WebsiteAlreadyExistsDetail,
@@ -62,9 +63,35 @@ _ORIGIN_UNIQUE_CONSTRAINT = "websites_user_id_origin_key"
 _NOT_FOUND_DETAIL = "No website with that id"
 
 
+def _owner_from_row(row: dict[str, Any]) -> Owner | None:
+    """Resolve `Owner` from a reader row's five named `auth.users` metadata columns.
+
+    Only `WebsitesReader.get_by_id`, `.list_all`, and `.list_all_with_latest_run` join
+    `auth.users` and carry `_OWNER_COLUMNS` (`websites_reader.py`) — a row from
+    `WebsitesWriter.insert`/`.update`, or from `get_by_user_and_origin`'s dedupe lookup, has
+    none of them, and `.get(...)` (never `row[...]`) is what lets this function build
+    `owner=None` for those instead of raising `KeyError`.
+
+    The two fallback chains this applies — `user_name` then `preferred_username` for
+    `handle`; `full_name` then `name` for `display_name` — are the same ones
+    `frontend/lib/auth/use-user.ts` applies for the signed-in user's own session, so an
+    owner is not named richly on their own row and anonymously on everyone else's.
+
+    Returns `None`, not `Owner(handle=None, display_name=None, avatar_url=None)`, when all
+    three resolved fields are `None` — see `Owner.owner`'s own docstring for why that
+    collapse is the point rather than an equivalent shorthand for it.
+    """
+    handle = row.get("owner_user_name") or row.get("owner_preferred_username")
+    display_name = row.get("owner_full_name") or row.get("owner_name")
+    avatar_url = row.get("owner_avatar_url")
+    if handle is None and display_name is None and avatar_url is None:
+        return None
+    return Owner(handle=handle, display_name=display_name, avatar_url=avatar_url)
+
+
 def _to_website(row: dict[str, Any]) -> WebsiteResponse:
     """Build the response DTO from a reader row."""
-    return WebsiteResponse.model_validate(row)
+    return WebsiteResponse.model_validate({**row, "owner": _owner_from_row(row)})
 
 
 def _to_list_item(row: dict[str, Any]) -> WebsiteListItemResponse:
@@ -107,6 +134,7 @@ def _to_list_item(row: dict[str, Any]) -> WebsiteListItemResponse:
         title=row["title"],
         enrich_with_llm=row["enrich_with_llm"],
         created_at=row["created_at"],
+        owner=_owner_from_row(row),
         latest_run=latest_run,
         schedule=schedule,
     )
@@ -211,7 +239,10 @@ class WebsiteService:
             return [_to_list_item(row) for row in rows]
 
         rows = await self._reader.list_all()
-        return [WebsiteListItemResponse.model_validate(row) for row in rows]
+        return [
+            WebsiteListItemResponse.model_validate({**row, "owner": _owner_from_row(row)})
+            for row in rows
+        ]
 
     async def get_website(self, website_id: UUID) -> WebsiteResponse:
         """Return one website by id, for any signed-in caller.
