@@ -23,14 +23,11 @@ engineering contract and wins wherever the two disagree.
 
 ---
 
-## Screenshots
+## Video Demo
 
-| | |
-| --- | --- |
-| ![Landing page](./docs/screenshots/01-landing.png) | ![The crawls table](./docs/screenshots/02-crawls.png) |
-| Paste a URL and the first run starts. | Every registered site, with its latest run. |
-| ![The Output tab](./docs/screenshots/03-output.png) | ![The Trends tab](./docs/screenshots/04-trends.png) |
-| The generated `llms.txt`, with `llms-full.txt` beside it. | What changed between runs, and how each run was built. |
+
+https://github.com/user-attachments/assets/7ed1ed9b-60ed-42b6-b0e1-fb894903ddbb
+
 
 ---
 
