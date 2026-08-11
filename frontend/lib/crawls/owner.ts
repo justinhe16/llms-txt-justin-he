@@ -104,14 +104,25 @@ export interface OwnerPill {
   isYou: boolean;
   /** The pill's own text: "you", `@handle`, a display name, or the short id. */
   text: string;
-  /** The tooltip's content: your own `@handle` when you have one (extra detail beyond
-   * "you"), or the full `user_id` for everyone else (extra detail beyond whatever `text`
-   * already shows — a handle, a name, or the same short id spelled out in full). */
+  /** The tooltip's content: the owner's `@handle` whenever one is known — yours read from
+   * your own session, everybody else's from `owner` — and the full `user_id` only when no
+   * handle exists at all. Hovering any pill therefore answers the same question about
+   * whoever it names, which is the point: a tooltip that showed a handle on your row and a
+   * raw UUID on the next one read as leftover plumbing rather than as a deliberate
+   * difference.
+   *
+   * On a row whose `text` is already the handle this repeats it, and that redundancy is
+   * accepted deliberately: the alternative rules (suppress the tooltip, or swap in the
+   * display name) make what a hover means depend on which fields that particular owner
+   * happens to have, and an inconsistent tooltip is worse than a redundant one. The rows
+   * where it still earns its keep are the ones with no handle — a display name, or the
+   * short id, either of which the full `user_id` genuinely expands on. */
   tooltip: string;
   /** True when `tooltip` above is the raw `user_id` rather than an `@handle` — the one case
-   * worth rendering in monospace, the same way the short id itself is. False on your own
-   * row whenever your session has a handle, and true there too on the rare row where it
-   * does not (the local dev password sign-in path). */
+   * worth rendering in monospace, the same way the short id itself is. False on any row
+   * whose owner has a handle, yours or anyone's; true on the rest (an owner known only by
+   * display name, one with no Auth metadata at all, and your own row on the local dev
+   * password sign-in path, which gives a session no handle). */
   tooltipIsRawId: boolean;
   /** The full `user_id`. */
   userId: string;
@@ -153,8 +164,8 @@ export function ownerPill(userId: string, viewer: OwnerViewer | null, owner: Own
   return {
     isYou: false,
     text,
-    tooltip: userId,
-    tooltipIsRawId: true,
+    tooltip: handle !== null ? `@${handle}` : userId,
+    tooltipIsRawId: handle === null,
     userId,
     avatarUrl,
     initial: avatarUrl === null && isIdentified ? initials(displayName ?? handle ?? "") : null,

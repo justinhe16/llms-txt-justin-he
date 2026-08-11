@@ -27,7 +27,8 @@ interface CrawlOwnerProps {
  * The Owner pill. Avatar (or a monogram) plus a real GitHub identity for EVERY owner now —
  * "you" plus your own session's avatar/handle on your own row, `@handle` (falling back to a
  * display name, falling back to a short, honest 8-hex-character id) on everybody else's —
- * with the full `user_id` in a tooltip whenever `text` is not already the unambiguous form.
+ * with that owner's `@handle` in a tooltip whenever one is known — on your row and on
+ * everybody else's alike — and the full `user_id` there only when no handle exists.
  *
  * This calls `useUser()` itself rather than taking the signed-in user as a prop. `@supabase/
  * ssr`'s `createBrowserClient` caches a singleton in the browser
