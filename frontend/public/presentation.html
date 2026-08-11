@@ -1,0 +1,621 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>llms-text — presentation</title>
+<meta name="description" content="What llms-text is, how it is built, and the rules it holds itself to." />
+<style>
+/* ---------------------------------------------------------------------------
+ * A self-contained deck. No build step, no dependencies, no network requests —
+ * this file is served straight out of frontend/public/ and rewritten onto
+ * /presentation in next.config.ts. It deliberately does NOT import the app's
+ * Tailwind theme: it is one file you can open with `open` or email to someone,
+ * and that only stays true while it has no imports. The palette below is
+ * transcribed from app/globals.css so it still looks like the product.
+ *
+ * Light theme only, same as the app (CLAUDE.md rule 7). There is no dark
+ * variant and no prefers-color-scheme query here either.
+ * ------------------------------------------------------------------------ */
+:root {
+  --background: oklch(0.982 0.007 84);   /* warmed stone-50 */
+  --foreground: oklch(0.216 0.006 56.043);
+  --card: oklch(1 0 0);
+  --muted: oklch(0.968 0.006 84);
+  --muted-foreground: oklch(0.553 0.013 58.071);
+  --border: oklch(0.923 0.003 48.717);
+  --primary: oklch(0.476 0.132 264.2);   /* the one accent: deep indigo */
+  --ok: oklch(0.596 0.145 163.225);
+  --warn: oklch(0.666 0.179 58.318);
+  --bad: oklch(0.586 0.253 17.585);
+  --radius: 0.625rem;
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+
+  /* One knob for the whole deck's motion. */
+  --ease: cubic-bezier(0.22, 0.75, 0.2, 1);
+  --dur: 0.62s;
+}
+
+* { box-sizing: border-box; }
+
+html {
+  /* The Google-Slides feel is mostly this line: the scroll never rests between
+   * two slides, so a flick always lands on exactly one. */
+  scroll-snap-type: y mandatory;
+  scroll-behavior: smooth;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  color: var(--foreground);
+  background: linear-gradient(180deg, var(--background), oklch(1 0 0));
+  background-attachment: fixed;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* --- the frame each slide is centred in ---------------------------------- */
+.stage {
+  height: 100svh;
+  display: grid;
+  place-items: center;
+  scroll-snap-align: center;
+  scroll-snap-stop: always;   /* never skip two slides on one hard flick */
+  padding: 2.5rem 1.25rem;
+}
+
+/* --- the slide itself: a 16:9 white card, exactly like a Slides canvas ---- */
+.slide {
+  position: relative;
+  /* 100%, not 96vw: the stage's own padding is already outside this box, and
+   * a viewport-unit width would add to it and push the page sideways on a
+   * phone. Height-derived width is what keeps the card 16:9 on a laptop. */
+  width: min(100%, calc((100svh - 5rem) * 16 / 9), 1120px);
+  aspect-ratio: 16 / 9;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) * 1.8);
+  padding: clamp(1.5rem, 4.2vmin, 3.5rem) clamp(1.75rem, 5vmin, 4rem);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: clamp(0.6rem, 1.6vmin, 1.25rem);
+  overflow: hidden;
+
+  /* The card recedes when it is not the current slide, and comes forward when
+   * it is. This is the "animates into the next slide" part. */
+  opacity: 0.35;
+  transform: scale(0.955) translateY(1.25rem);
+  transition:
+    opacity var(--dur) var(--ease),
+    transform var(--dur) var(--ease);
+}
+.stage.is-active .slide { opacity: 1; transform: none; }
+
+/* Each child marked .anim rises in behind the card, staggered by --d. */
+.anim {
+  opacity: 0;
+  transform: translateY(14px);
+  transition:
+    opacity var(--dur) var(--ease),
+    transform var(--dur) var(--ease);
+  transition-delay: var(--d, 0s);
+}
+.stage.is-active .anim { opacity: 1; transform: none; }
+
+/* --- type ----------------------------------------------------------------- */
+.eyebrow {
+  font-size: clamp(0.62rem, 1.35vmin, 0.8rem);
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--primary);
+}
+h1 {
+  margin: 0;
+  font-size: clamp(2rem, 7.2vmin, 4.4rem);
+  line-height: 1.02;
+  letter-spacing: -0.035em;
+  font-weight: 640;
+}
+h2 {
+  margin: 0;
+  font-size: clamp(1.4rem, 4.4vmin, 2.9rem);
+  line-height: 1.1;
+  letter-spacing: -0.03em;
+  font-weight: 620;
+}
+p, li {
+  margin: 0;
+  font-size: clamp(0.85rem, 2.05vmin, 1.28rem);
+  line-height: 1.55;
+  color: var(--muted-foreground);
+}
+strong { color: var(--foreground); font-weight: 600; }
+code, .mono { font-family: var(--font-mono); font-size: 0.92em; }
+a { color: var(--primary); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+
+ul { margin: 0; padding: 0; list-style: none; display: grid; gap: clamp(0.4rem, 1.3vmin, 0.85rem); }
+ul.bullets li { padding-left: 1.4em; position: relative; }
+ul.bullets li::before {
+  content: "";
+  position: absolute;
+  left: 0.25em; top: 0.62em;
+  width: 0.42em; height: 0.42em;
+  border-radius: 999px;
+  background: var(--primary);
+}
+
+/* Section slides — the title, "Demo", "Any questions?" — centre both ways. */
+.slide.center { align-items: center; justify-content: center; text-align: center; }
+.slide.center h1 { font-size: clamp(2.4rem, 10vmin, 6rem); }
+.lede {
+  font-size: clamp(0.95rem, 2.6vmin, 1.6rem);
+  color: var(--muted-foreground);
+  max-width: 48ch;
+  text-wrap: balance;   /* never leaves "and more." alone on a second line */
+}
+
+/* --- reusable slide furniture -------------------------------------------- */
+.cols { display: grid; grid-template-columns: repeat(3, 1fr); gap: clamp(0.6rem, 1.8vmin, 1.25rem); }
+.cols.two { grid-template-columns: repeat(2, 1fr); }
+
+.tile {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: clamp(0.7rem, 2vmin, 1.35rem);
+  background: var(--muted);
+  display: grid;
+  gap: 0.35rem;
+  align-content: start;
+}
+.tile h3 {
+  margin: 0;
+  font-size: clamp(0.82rem, 2vmin, 1.15rem);
+  font-weight: 620;
+  letter-spacing: -0.015em;
+}
+.tile p { font-size: clamp(0.72rem, 1.7vmin, 1rem); }
+
+.flow { display: flex; align-items: stretch; gap: clamp(0.4rem, 1.2vmin, 0.9rem); }
+.flow .tile { flex: 1; }
+.flow .arrow {
+  align-self: center;
+  color: var(--border);
+  font-size: clamp(1rem, 2.6vmin, 1.6rem);
+  line-height: 1;
+}
+
+.pill {
+  display: inline-flex; align-items: center; gap: 0.45em;
+  font-size: clamp(0.66rem, 1.55vmin, 0.9rem);
+  font-family: var(--font-mono);
+  padding: 0.3em 0.7em;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--card);
+  color: var(--muted-foreground);
+}
+.dot { width: 0.5em; height: 0.5em; border-radius: 999px; background: currentColor; }
+.dot.ok { color: var(--ok); } .dot.warn { color: var(--warn); } .dot.bad { color: var(--bad); }
+
+.stat { font-size: clamp(1.6rem, 5.4vmin, 3.2rem); font-weight: 640; letter-spacing: -0.03em; color: var(--foreground); line-height: 1; }
+
+.rule { height: 1px; background: var(--border); border: 0; margin: 0; }
+
+.slide-no {
+  position: absolute;
+  right: clamp(1rem, 3vmin, 2rem);
+  bottom: clamp(0.8rem, 2.4vmin, 1.6rem);
+  font-family: var(--font-mono);
+  font-size: clamp(0.6rem, 1.4vmin, 0.8rem);
+  color: var(--muted-foreground);
+  opacity: 0.65;
+}
+
+/* --- chrome: progress bar, dots, hint ------------------------------------ */
+#progress {
+  position: fixed; inset: 0 auto auto 0;
+  height: 2px; width: 0%;
+  background: var(--primary);
+  z-index: 10;
+  transition: width 0.15s linear;
+}
+
+#dots {
+  position: fixed;
+  right: clamp(0.5rem, 1.6vw, 1.1rem);
+  top: 50%; transform: translateY(-50%);
+  display: grid; gap: 0.55rem;
+  z-index: 10;
+}
+#dots button {
+  width: 9px; height: 9px; padding: 0;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  cursor: pointer;
+  transition: background 0.25s var(--ease), transform 0.25s var(--ease), border-color 0.25s var(--ease);
+}
+#dots button[aria-current="true"] {
+  background: var(--primary);
+  border-color: var(--primary);
+  transform: scale(1.35);
+}
+#dots button:focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }
+
+#hint {
+  position: fixed;
+  left: 50%; bottom: 1rem; transform: translateX(-50%);
+  font-size: 0.72rem; color: var(--muted-foreground);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.35em 0.9em;
+  z-index: 10;
+  transition: opacity 0.4s var(--ease);
+}
+#hint.gone { opacity: 0; pointer-events: none; }
+kbd {
+  font-family: var(--font-mono); font-size: 0.9em;
+  border: 1px solid var(--border); border-bottom-width: 2px;
+  border-radius: 4px; padding: 0 0.35em; margin: 0 0.1em;
+}
+
+@media (max-width: 640px) {
+  #dots { display: none; }
+  .cols, .cols.two { grid-template-columns: 1fr; }
+  .flow { flex-direction: column; }
+  .flow .arrow { transform: rotate(90deg); align-self: start; }
+  .slide { aspect-ratio: auto; min-height: 68svh; }
+}
+
+/* Motion is decoration here — the deck reads identically without it. */
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  .slide, .anim { transition: none; opacity: 1; transform: none; }
+}
+
+/* ---------------------------------------------------------------------------
+ * THE TWO DIAGRAMS, ported from the app.
+ *
+ * components/docs/docs-diagram.tsx and components/docs/architecture-diagram.tsx
+ * render these from lib/docs/sections.ts and lib/docs/architecture.ts, with
+ * magicui's <AnimatedBeam> drawing the connectors. None of that can come along
+ * to a dependency-free file, so the geometry is transcribed here: same nodes,
+ * same order, same edges, same palette. The beam is the one thing rebuilt
+ * rather than copied — AnimatedBeam measures two refs and animates an SVG
+ * gradient between them; here a CSS keyframe walks a short indigo segment down
+ * a hairline, which looks the same and measures nothing.
+ *
+ * If a stage or a deployed piece is ever added over there, it has to be added
+ * here by hand. That is the price of the file having no imports.
+ * ------------------------------------------------------------------------ */
+.rails {
+  display: grid;
+  grid-template-columns: 0.92fr 1fr;
+  gap: clamp(1rem, 3.2vmin, 2.5rem);
+  min-height: 0;   /* lets the SVG shrink inside the flex column */
+  flex: 1;
+}
+.rail { display: flex; flex-direction: column; min-height: 0; gap: clamp(0.4rem, 1.4vmin, 0.9rem); }
+.rail-title {
+  font-size: clamp(0.55rem, 1.25vmin, 0.72rem);
+  font-weight: 500;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+}
+
+/* --- left rail: the seven stages of a run -------------------------------- */
+.pipe { display: flex; flex-direction: column; }
+.pipe-node {
+  display: flex; align-items: center; gap: 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--card);
+  padding: clamp(0.3rem, 1vmin, 0.55rem) clamp(0.45rem, 1.3vmin, 0.75rem);
+  color: var(--muted-foreground);
+  font-size: clamp(0.62rem, 1.5vmin, 0.88rem);
+  font-weight: 500;
+}
+/* The run's first stage, lit the way the live diagram lights whichever section
+ * you have scrolled to. A deck does not scroll a doc, so it stays on Seed URL. */
+.pipe-node.on { border-color: color-mix(in oklch, var(--primary) 40%, transparent); color: var(--foreground); }
+.pipe-node .chip {
+  flex: none;
+  width: clamp(1.15rem, 2.7vmin, 1.6rem); height: clamp(1.15rem, 2.7vmin, 1.6rem);
+  display: grid; place-items: center;
+  border-radius: calc(var(--radius) * 0.6);
+  background: var(--muted);
+  color: var(--muted-foreground);
+}
+.pipe-node.on .chip { background: color-mix(in oklch, var(--primary) 10%, transparent); color: var(--primary); }
+.pipe-node .chip svg { width: 62%; height: 62%; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.pipe-node .chip svg.solid { fill: currentColor; stroke: none; }
+
+/* The connector between two stages: a hairline, plus a segment travelling it. */
+.beam {
+  position: relative;
+  height: clamp(0.5rem, 1.7vmin, 1.1rem);
+  margin-left: clamp(1.1rem, 2.6vmin, 1.5rem);
+  width: 1.5px;
+  background: var(--border);
+  overflow: hidden;
+}
+.beam::after {
+  content: "";
+  position: absolute; inset: 0;
+  background: linear-gradient(to bottom, transparent, var(--primary), transparent);
+  animation: beam-fall 4s linear infinite;
+  animation-delay: var(--bd, 0s);
+}
+@keyframes beam-fall {
+  0%   { transform: translateY(-100%); opacity: 0; }
+  15%  { opacity: 1; }
+  85%  { opacity: 1; }
+  100% { transform: translateY(100%); opacity: 0; }
+}
+
+/* --- right rail: what is deployed where ---------------------------------- */
+.arch { flex: 1; min-height: 0; display: grid; place-items: center; }
+.arch svg { width: 100%; height: 100%; max-height: 100%; }
+.arch .node { fill: var(--card); stroke: var(--border); stroke-width: 1; }
+.arch .lbl { fill: var(--foreground); font-size: 13px; font-weight: 600; text-anchor: middle; }
+.arch .sub { fill: var(--muted-foreground); font-size: 10px; text-anchor: middle; }
+.arch .chip-r { fill: var(--muted); stroke: none; }
+.arch .chip-t { fill: var(--muted-foreground); font-size: 8.5px; text-anchor: middle; }
+.arch .edge { stroke: var(--border); stroke-width: 1.5; fill: none; }
+/* pathLength normalises every edge to 100 units, so one dash pair animates at
+ * the same apparent speed on a 20px hop and a 240px run. */
+.arch .flow {
+  stroke: var(--primary); stroke-width: 1.5; fill: none; stroke-linecap: round;
+  stroke-dasharray: 10 90;
+  animation: beam-run 4s linear infinite;
+  animation-delay: var(--bd, 0s);
+}
+.arch .edge.dashed { stroke-dasharray: 4 4; }
+@keyframes beam-run { from { stroke-dashoffset: 100; } to { stroke-dashoffset: 0; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .beam::after, .arch .flow { animation: none; opacity: 0; }
+}
+@media (max-width: 900px) {
+  .rails { grid-template-columns: 1fr; }
+  .arch { min-height: 300px; }
+}
+
+/* Cmd-P gives one slide per page instead of a 9-page ribbon. */
+@media print {
+  html { scroll-snap-type: none; }
+  #progress, #dots, #hint { display: none; }
+  .stage { height: auto; page-break-after: always; padding: 0; }
+  .slide, .anim { opacity: 1; transform: none; box-shadow: none; }
+}
+</style>
+</head>
+<body>
+
+<div id="progress"></div>
+<nav id="dots" aria-label="Slides"></nav>
+<div id="hint"><kbd>↓</kbd> <kbd>space</kbd> or scroll</div>
+
+<main>
+
+  <!-- 1 --------------------------------------------------------------- -->
+  <section class="stage">
+    <article class="slide center">
+      <h1 class="anim mono" style="color:var(--primary)">llms.txt</h1>
+      <p class="lede anim" style="--d:.12s">Crawl sites, generate <span class="mono">llms.txt</span>, observe trends and more.</p>
+      <span class="slide-no"></span>
+    </article>
+  </section>
+
+  <!-- 2 --------------------------------------------------------------- -->
+  <section class="stage">
+    <article class="slide">
+      <p class="eyebrow anim">What I built</p>
+      <div class="cols anim" style="--d:.1s; margin-top:.35rem">
+        <div class="tile"><h3>Website analysis</h3><p>Sitemaps, robots.txt and seed links, scored down to the pages that carry content.</p></div>
+        <div class="tile"><h3><span class="mono">llms.txt</span> generation</h3><p><span class="mono">llms.txt</span> as the index, <span class="mono">llms-full.txt</span> as the page text. Both stored per run.</p></div>
+        <div class="tile"><h3>Schedules</h3><p>Automated re-crawls on a cadence, run by the worker's scheduler tick.</p></div>
+        <div class="tile"><h3>GitHub publishing</h3><p>Optional. Connect a repo and a finished run opens a pull request with the file.</p></div>
+        <div class="tile"><h3>Trends</h3><p>Runs are kept, so you can see what changed on the site and in the artifact.</p></div>
+        <div class="tile"><h3>Opinionated content</h3><p>A ranked, capped index with an <span class="mono">## Optional</span> section — plus an optional LLM pass.</p></div>
+      </div>
+      <span class="slide-no"></span>
+    </article>
+  </section>
+
+  <!-- 3 --------------------------------------------------------------- -->
+  <section class="stage">
+    <article class="slide">
+      <p class="eyebrow anim">How it works, and how I built this</p>
+      <div class="rails anim" style="--d:.1s">
+
+        <div class="rail">
+          <p class="rail-title">How a run works</p>
+          <div class="pipe">
+          <div class="pipe-node on"><span class="chip"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 17H7A5 5 0 0 1 7 7h2"/><path d="M15 7h2a5 5 0 1 1 0 10h-2"/><path d="M8 12h8"/></svg></span>Seed URL</div>
+          <div class="beam" style="--bd:0.00s"></div>
+          <div class="pipe-node"><span class="chip"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="16" y="16" width="6" height="6" rx="1"/><rect x="2" y="16" width="6" height="6" rx="1"/><rect x="9" y="2" width="6" height="6" rx="1"/><path d="M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3"/><path d="M12 12V8"/></svg></span>URL discovery</div>
+          <div class="beam" style="--bd:0.28s"></div>
+          <div class="pipe-node"><span class="chip"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 5h20"/><path d="M6 12h12"/><path d="M9 19h6"/></svg></span>URL selection</div>
+          <div class="beam" style="--bd:0.56s"></div>
+          <div class="pipe-node"><span class="chip"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/></svg></span>Page fetch</div>
+          <div class="beam" style="--bd:0.84s"></div>
+          <div class="pipe-node"><span class="chip"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z"/><path d="M14 2v5a1 1 0 0 0 1 1h5"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/></svg></span>Content extraction</div>
+          <div class="beam" style="--bd:1.12s"></div>
+          <div class="pipe-node"><span class="chip"><svg class="solid" viewBox="0 0 46 32" aria-hidden="true"><path d="M32.73 0h-6.945L38.45 32h6.945L32.73 0ZM12.665 0 0 32h7.082l2.59-6.72h13.25l2.59 6.72h7.082L19.929 0h-7.264Zm-.702 19.337 4.334-11.246 4.334 11.246h-8.668Z"/></svg></span>Optional summary</div>
+          <div class="beam" style="--bd:1.40s"></div>
+          <div class="pipe-node"><span class="chip"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12.15V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.706.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2h-3.35"/><path d="M14 2v5a1 1 0 0 0 1 1h5"/><path d="m5 16-3 3 3 3"/><path d="m9 22 3-3-3-3"/></svg></span>llms.txt output</div>
+          </div>
+        </div>
+
+        <div class="rail">
+          <p class="rail-title">What is deployed where</p>
+          <div class="arch">
+            <svg viewBox="0 0 440 452" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Browser to Next.js on Vercel to FastAPI on Fly.io; FastAPI to the Upstash Redis job queue and to Supabase; the ARQ worker claims jobs from the queue, enqueues its own, writes to Supabase, and can call the Anthropic API.">
+            <path class="edge" pathLength="100" d="M112 31 V103" />
+            <path class="edge" pathLength="100" d="M112 103 V175" />
+            <path class="edge" pathLength="100" d="M112 175 C 112 215, 328 205, 328 247" />
+            <path class="edge" pathLength="100" d="M321 247 V333" />
+            <path class="edge" pathLength="100" d="M335 333 V247" />
+            <path class="edge" pathLength="100" d="M112 175 V421" />
+            <path class="edge" pathLength="100" d="M328 333 C 328 390, 200 380, 112 421" />
+            <path class="edge dashed" d="M328 372 V396" />
+            <path class="flow" pathLength="100" d="M112 31 V103" style="--bd:0.0s" />
+            <path class="flow" pathLength="100" d="M112 103 V175" style="--bd:0.3s" />
+            <path class="flow" pathLength="100" d="M112 175 C 112 215, 328 205, 328 247" style="--bd:0.6s" />
+            <path class="flow" pathLength="100" d="M321 247 V333" style="--bd:0.9s" />
+            <path class="flow" pathLength="100" d="M335 333 V247" style="--bd:1.6s" />
+            <path class="flow" pathLength="100" d="M112 175 V421" style="--bd:1.2s" />
+            <path class="flow" pathLength="100" d="M328 333 C 328 390, 200 380, 112 421" style="--bd:1.5s" />
+            <rect class="node" x="19" y="6" width="186" height="50" rx="10" />
+            <text class="lbl" x="112" y="30">Browser</text>
+            <text class="sub" x="112" y="45">the reader</text>
+            <rect class="node" x="19" y="78" width="186" height="50" rx="10" />
+            <text class="lbl" x="112" y="102">Next.js</text>
+            <text class="sub" x="112" y="117">Vercel</text>
+            <rect class="node" x="19" y="150" width="186" height="50" rx="10" />
+            <text class="lbl" x="112" y="174">FastAPI</text>
+            <text class="sub" x="112" y="189">Fly.io</text>
+            <rect class="node" x="235" y="222" width="186" height="50" rx="10" />
+            <text class="lbl" x="328" y="246">Job queue</text>
+            <text class="sub" x="328" y="261">Upstash Redis</text>
+            <rect class="node" x="235" y="294" width="186" height="78" rx="10" />
+            <text class="lbl" x="328" y="313">ARQ worker</text>
+            <text class="sub" x="328" y="328">Fly.io</text>
+            <rect class="node" x="19" y="396" width="186" height="50" rx="10" />
+            <text class="lbl" x="112" y="420">Supabase</text>
+            <text class="sub" x="112" y="435">Postgres · Storage</text>
+            <rect class="node" x="235" y="396" width="186" height="50" rx="10" />
+            <text class="lbl" x="328" y="420">Anthropic API</text>
+            <text class="sub" x="328" y="435">off by default</text>
+            <rect class="chip-r" x="255" y="337" width="34" height="16" rx="8" />
+            <text class="chip-t" x="272" y="348.5">Crawl</text>
+            <rect class="chip-r" x="295" y="337" width="62" height="16" rx="8" />
+            <text class="chip-t" x="326" y="348.5">Scheduler tick</text>
+            <rect class="chip-r" x="363" y="337" width="38" height="16" rx="8" />
+            <text class="chip-t" x="382" y="348.5">Reaper</text>
+            </svg>
+          </div>
+        </div>
+
+      </div>
+      <span class="slide-no"></span>
+    </article>
+  </section>
+
+  <!-- 4 --------------------------------------------------------------- -->
+  <section class="stage">
+    <article class="slide center">
+      <h1 class="anim">Demo</h1>
+      <span class="slide-no"></span>
+    </article>
+  </section>
+
+  <!-- 5 --------------------------------------------------------------- -->
+  <section class="stage">
+    <article class="slide center">
+      <h1 class="anim">Any questions?</h1>
+      <span class="slide-no"></span>
+    </article>
+  </section>
+
+</main>
+
+<script>
+(function () {
+  var stages = Array.prototype.slice.call(document.querySelectorAll('.stage'));
+  var dots = document.getElementById('dots');
+  var progress = document.getElementById('progress');
+  var hint = document.getElementById('hint');
+  var current = 0;
+
+  // Slide numbers, so reordering the markup never desynchronises them.
+  stages.forEach(function (stage, i) {
+    var no = stage.querySelector('.slide-no');
+    if (no) no.textContent = (i + 1) + ' / ' + stages.length;
+
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.setAttribute('aria-label', 'Go to slide ' + (i + 1));
+    b.addEventListener('click', function () { go(i); });
+    dots.appendChild(b);
+  });
+
+  function setCurrent(i) {
+    if (i === current) return;
+    current = i;
+    var kids = dots.children;
+    for (var n = 0; n < kids.length; n++) {
+      kids[n].setAttribute('aria-current', n === i ? 'true' : 'false');
+    }
+    progress.style.width = (stages.length < 2 ? 100 : (i / (stages.length - 1)) * 100) + '%';
+  }
+
+  // `pending` is the slide a smooth scroll is travelling toward. Stepping has
+  // to count from it rather than from `current`: two arrow presses in quick
+  // succession both read `current` before the observer has updated it, so
+  // counting from `current` turns the second press into a no-op and the deck
+  // feels stuck under a held-down key.
+  var pending = null;
+
+  function go(i) {
+    i = Math.max(0, Math.min(stages.length - 1, i));
+    pending = i;
+    stages[i].scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+
+  function step(delta) {
+    go((pending === null ? current : pending) + delta);
+  }
+
+  // IntersectionObserver rather than a CSS scroll timeline (animation-timeline
+  // is still ~84% support in 2026, with Firefox and older Safari missing it).
+  // This does the same job with no polyfill and no @supports fork.
+  var io = new IntersectionObserver(function (entries) {
+    entries.forEach(function (entry) {
+      entry.target.classList.toggle('is-active', entry.isIntersecting);
+      if (!entry.isIntersecting) return;
+      var i = stages.indexOf(entry.target);
+      setCurrent(i);
+      if (i === pending) pending = null;
+    });
+  }, { threshold: 0.55 });
+
+  stages.forEach(function (s) { io.observe(s); });
+  setCurrent(0);
+  dots.children[0].setAttribute('aria-current', 'true');
+
+  document.addEventListener('keydown', function (e) {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    var k = e.key;
+    if (k === 'ArrowDown' || k === 'ArrowRight' || k === 'PageDown' || k === ' ') {
+      e.preventDefault(); step(1);
+    } else if (k === 'ArrowUp' || k === 'ArrowLeft' || k === 'PageUp') {
+      e.preventDefault(); step(-1);
+    } else if (k === 'Home') {
+      e.preventDefault(); go(0);
+    } else if (k === 'End') {
+      e.preventDefault(); go(stages.length - 1);
+    }
+  });
+
+  ['wheel', 'touchmove'].forEach(function (evt) {
+    window.addEventListener(evt, function () { pending = null; }, { passive: true });
+  });
+
+  // The hint has done its job the moment anyone moves.
+  function dismiss() { hint.classList.add('gone'); }
+  window.addEventListener('scroll', dismiss, { once: true, passive: true });
+  document.addEventListener('keydown', dismiss, { once: true });
+})();
+</script>
+
+</body>
+</html>
