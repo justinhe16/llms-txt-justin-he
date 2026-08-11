@@ -864,9 +864,13 @@ def test_a_marketing_paragraph_starting_with_a_hash_number_is_not_mistaken_for_a
 
 def test_the_prose_block_omits_a_paragraph_near_identical_to_the_blockquote() -> None:
     """Sites routinely lift `og:description` from their own hero copy — repeating it one
-    paragraph later would be noise, not orientation. The text still legitimately appears a
-    SECOND time, as the root page's own bullet description — what this test actually pins is
-    that no THIRD, prose-block copy appears between the blockquote and the first heading."""
+    paragraph later would be noise, not orientation.
+
+    This docstring used to say the text "still legitimately appears a SECOND time, as the root
+    page's own bullet description." It does not any more: `_describe`'s blockquote check drops
+    that copy too, so the sentence appears exactly ONCE in the whole document. Pinned below,
+    because the count is the point.
+    """
     text = "Acme helps teams ship documentation their users actually read every single day."
     pages = [_page("https://example.test/", title="Acme", description=text, markdown=text)]
     output = generate_llms_txt(pages, site_url=_SITE)
@@ -875,6 +879,7 @@ def test_the_prose_block_omits_a_paragraph_near_identical_to_the_blockquote() ->
     assert lines[2] == f"> {text}"
     assert lines[3] == ""
     assert lines[4] == "## Overview", "no prose-block paragraph between blockquote and heading"
+    assert output.count(text) == 1, "blockquote only — not the prose block, not the bullet"
 
 
 def test_an_optional_section_adds_no_prose_about_the_document_itself() -> None:
@@ -904,6 +909,122 @@ def test_an_optional_section_adds_no_prose_about_the_document_itself() -> None:
     assert f"## {OPTIONAL_SECTION}" in both, "the Optional section itself is untouched"
     assert "grouped under Optional" not in both
     assert "grouped by topic" not in both
+
+
+def test_the_root_bullet_drops_a_description_that_restates_the_blockquote() -> None:
+    """The structural case: `_site_sentence` and `_describe` read the same field, so the root
+    page's bullet used to repeat the blockquote verbatim whenever it had a description at all.
+    A bare link is the clean outcome the llmstxt.org format is built for — the sentence is still
+    three lines up."""
+    text = "Acme helps teams ship documentation their users actually read every single day."
+    pages = [
+        _page("https://example.test/", title="Acme", description=text, markdown="Body. " * 40),
+        _page("https://example.test/docs/a", title="A", description="How to install the CLI."),
+    ]
+    output = generate_llms_txt(pages, site_url=_SITE)
+
+    assert f"> {text}" in output
+    assert "- [Acme](https://example.test/)\n" in output, "bare link, no description"
+    assert output.count(text) == 1
+    # A page with something of its own to say is untouched.
+    assert "- [A](https://example.test/docs/a): How to install the CLI." in output
+
+
+def test_the_root_bullet_is_unconditionally_bare_when_the_homepage_has_a_description() -> None:
+    """A consequence worth stating outright, because it surprised the author of the check: for
+    the ROOT page the two texts cannot diverge, so its bullet now never carries a description.
+
+    `_site_sentence` and `_describe` both reduce the root page's `description` to its first whole
+    sentence under a 30-word cap and both pass it through `_clean` — same input, same transform,
+    same output. So "drop the bullet when it duplicates the blockquote" is, on the root page
+    alone, equivalent to "the root bullet has no description," and the three descriptions below
+    (short, longer, one whose first sentence overruns the cap) all land the same way.
+
+    Kept as a duplicate check rather than hardcoded as "root bullets are bare" on purpose: the
+    check states WHY, so if `_site_sentence`'s cap or sourcing ever changes such that the two
+    texts genuinely differ, a differing description would correctly survive instead of being
+    stripped by a rule that had quietly stopped being true.
+    """
+    for description in (
+        "Acme is a documentation platform.",
+        "Acme is a documentation platform for engineering teams that care about their docs.",
+        " ".join(["Acme"] * 40) + ".",
+    ):
+        pages = [
+            _page(
+                "https://example.test/",
+                title="Acme",
+                description=description,
+                markdown="Every team ships docs. Few ship docs anyone reads. We fix that.",
+            )
+        ]
+        output = generate_llms_txt(pages, site_url=_SITE)
+
+        assert "- [Acme](https://example.test/)\n" in output, description
+        assert "- [Acme](https://example.test/):" not in output, description
+
+
+def test_a_non_root_bullet_keeps_a_description_the_blockquote_does_not_already_carry() -> None:
+    """The check is a duplicate test, not a rule against bullets having descriptions. Only the
+    root page's is structurally doomed; every other page speaks for itself."""
+    pages = [
+        _page("https://example.test/", title="Acme", description="Acme is a docs platform."),
+        _page("https://example.test/docs/a", title="A", description="How to install the CLI."),
+        _page("https://example.test/docs/b", title="B", description="How to configure the CLI."),
+    ]
+    output = generate_llms_txt(pages, site_url=_SITE)
+
+    assert "> Acme is a docs platform." in output
+    assert "- [A](https://example.test/docs/a): How to install the CLI." in output
+    assert "- [B](https://example.test/docs/b): How to configure the CLI." in output
+
+
+def test_the_blockquote_check_catches_a_prefix_not_only_an_exact_match() -> None:
+    """`_is_near_identical`'s normalized-prefix case, which is the common shape rather than the
+    exotic one: a blockquote capped at `_SITE_SENTENCE_MAX_WORDS` against a bullet description
+    cut to its first whole sentence, both drawn from the same underlying copy."""
+    sentence = "Acme helps teams ship documentation their users actually read."
+    pages = [
+        _page(
+            "https://example.test/",
+            title="Acme",
+            description=f"{sentence} It has done so since 2019 for hundreds of teams worldwide.",
+            markdown="Body. " * 40,
+        )
+    ]
+    output = generate_llms_txt(pages, site_url=_SITE)
+
+    assert f"> {sentence}" in output
+    assert "- [Acme](https://example.test/)\n" in output, "prefix match still drops the bullet"
+
+
+def test_a_count_sentence_blockquote_disables_the_check_rather_than_dropping_everything() -> None:
+    """When the root page is absent, `_site_sentence` is `None` and the blockquote is a count
+    sentence. Nothing is being duplicated, so every bullet keeps its own description — a `None`
+    must not be compared against and must not silently match."""
+    pages = [
+        _page("https://example.test/docs/a", title="A", description="How to install the CLI."),
+        _page("https://example.test/docs/b", title="B", description="How to configure the CLI."),
+    ]
+    output = generate_llms_txt(pages, site_url=_SITE)
+
+    assert "> An index of 2 pages" in output
+    assert "- [A](https://example.test/docs/a): How to install the CLI." in output
+    assert "- [B](https://example.test/docs/b): How to configure the CLI." in output
+
+
+def test_llms_full_txt_drops_the_duplicate_description_on_the_same_page() -> None:
+    """Both artifacts are built from the one `_index_entries` list, so the check cannot apply to
+    the index and not the expansion — which is exactly the disagreement `_select`'s docstring
+    says sharing that list exists to prevent."""
+    text = "Acme helps teams ship documentation their users actually read every single day."
+    pages = [_page("https://example.test/", title="Acme", description=text, markdown="Body. " * 40)]
+
+    index = generate_llms_txt(pages, site_url=_SITE)
+    full = generate_llms_full_txt(pages, site_url=_SITE)
+
+    assert index.count(text) == 1
+    assert full.count(text) == 1
 
 
 def test_no_prose_block_means_blockquote_goes_straight_to_the_first_heading() -> None:

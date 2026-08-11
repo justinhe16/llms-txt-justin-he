@@ -1093,7 +1093,9 @@ def _boilerplate_descriptions(candidates: list[_Candidate]) -> frozenset[str]:
     )
 
 
-def _describe(raw: str | None, label: str, boilerplate: frozenset[str]) -> str | None:
+def _describe(
+    raw: str | None, label: str, boilerplate: frozenset[str], site_sentence: str | None
+) -> str | None:
     """A page's raw `description` turned into a bullet's worth of text, or `None`.
 
     In order: `None`/whitespace-only stays `None`. A RAW description already ending in `…` or
@@ -1114,7 +1116,36 @@ def _describe(raw: str | None, label: str, boilerplate: frozenset[str]) -> str |
     to support, and a mid-clause fragment is not. What survives `_whole_sentence` still passes
     through `_clean` — the hard `MAX_TEXT_CHARS` safety net, IN ADDITION TO this rule rather
     than instead of it (see that constant's own docstring) — before a description that merely
-    restates `label` is dropped as the final check: a bare link already says as much.
+    restates `label` is dropped: a bare link already says as much.
+
+    **The final check drops a description that restates the BLOCKQUOTE** (`site_sentence`,
+    compared with `_is_near_identical` — the same helper, and the same normalized-prefix case,
+    that stops `_prose_paragraph` repeating it three lines higher up). The blockquote states what
+    the site is, once, at the top of the document; a bullet that says it again spends tokens to
+    tell a reader something it can still see. `None` for `site_sentence` (a run whose blockquote
+    fell back to a count sentence) disables the check, since there is then nothing to duplicate.
+
+    **The root page is the case this exists for, and on that page the duplication is structural
+    rather than incidental.** `_site_sentence` reads the root page's own `description`, and so
+    does this function, so before this check the two were the same text by construction whenever
+    the root page had one — the H1, the blockquote, and the Overview bullet between them stated
+    two facts three times, which on a one-page run was very nearly the entire artifact.
+    `internals/enrich.py` sharpened it from occasional to near-certain: with extraction alone a
+    homepage often has no `description` at all and the blockquote falls through to its prose,
+    while an enriched page always has one.
+
+    **Which makes the check unconditional for the root page, and that is fine.** Both this
+    function and `_site_sentence` reduce that one `description` to its first whole sentence under
+    a 30-word cap and pass it through `_clean` — same input, same transform, so the two texts
+    cannot diverge, and a root page with a usable description now always renders as a bare link.
+    Written as a duplicate check anyway rather than hardcoded as "the root bullet has no
+    description," because the check states WHY: if `_site_sentence`'s cap or sourcing ever changes
+    so the two genuinely differ, a differing description survives instead of being stripped by a
+    rule that had quietly stopped being true. A NON-root page matching is incidental (a site-wide
+    `og:description` on a run too small for `_boilerplate_descriptions`' three-page threshold to
+    fire) and equally redundant, so it is dropped too rather than special-casing the root — one
+    rule, one parameter, and the narrower version would need `origin` threaded here to ask
+    `_is_origin_root_url` a question whose answer changes nothing.
     """
     if raw is None:
         return None
@@ -1132,6 +1163,8 @@ def _describe(raw: str | None, label: str, boilerplate: frozenset[str]) -> str |
     if cleaned is None:
         return None
     if _restates_label(cleaned, label):
+        return None
+    if site_sentence is not None and _is_near_identical(cleaned, site_sentence):
         return None
     return cleaned
 
@@ -1215,6 +1248,11 @@ def _site_sentence(root_page: CrawledPage | None) -> str | None:
     overran the cap). `None` is a normal, common result, not a failure: `_index_summary`/
     `_full_summary` fall back to a count sentence when this is `None`, and every value
     returned here has already been through `_clean`'s `MAX_TEXT_CHARS` safety bound.
+
+    **Also read by `_describe`**, which drops any bullet description near-identical to this
+    sentence so the document states it once. That makes this function's sourcing and its 30-word
+    cap load-bearing for a bullet as well as for the blockquote — see `_describe`'s own docstring
+    before changing either.
 
     Never a word-boundary cut partway through the sentence — see `_whole_sentence`'s own
     docstring for the failure mode this avoids: a blockquote reading "…and stay competitive
@@ -1722,7 +1760,16 @@ def _select(
     main, optional = _ensure_non_empty_main(main, optional)
     main = _consolidate(main)
     boilerplate = _boilerplate_descriptions([candidate for candidate, _score in (*main, *optional)])
-    entries = _ordered_entries(main, optional, boilerplate)
+    # Recomputed here rather than passed in from the generators, which derive it for the
+    # blockquote itself: `_site_sentence` is pure, both callers of this function would otherwise
+    # have to thread a value neither of them has yet at this point, and a duplicate call to a
+    # pure function is cheaper than widening `_Selection` for something only `_describe` reads.
+    # It reaches `_describe` ONLY — nothing above this line consults it, so which pages are
+    # indexed, how they are grouped, the main-body/Optional split, and their order are all
+    # already fixed before it is computed (CLAUDE.md #9: selection never depends on a
+    # `description`; a bullet's text is a label, and labels are free to vary).
+    site_sentence = _site_sentence(_root_page(pages, origin))
+    entries = _ordered_entries(main, optional, boilerplate, site_sentence)
     return _Selection(entries=entries, duplicate=duplicate)
 
 
@@ -1887,6 +1934,7 @@ def _ordered_entries(
     main: list[tuple[_Candidate, float]],
     optional: list[tuple[_Candidate, float]],
     boilerplate: frozenset[str],
+    site_sentence: str | None,
 ) -> list[_Entry]:
     """Stage 7 (stage 6, `_describe`, happens per-entry inline here — see the module docstring):
     the main body sorted `(section rank, section name, -score, url)`, then Optional sorted flat
@@ -1906,7 +1954,9 @@ def _ordered_entries(
             section=candidate.section,
             url=candidate.url,
             label=candidate.label,
-            description=_describe(candidate.page.description, candidate.label, boilerplate),
+            description=_describe(
+                candidate.page.description, candidate.label, boilerplate, site_sentence
+            ),
             markdown=candidate.page.markdown,
             optional=False,
         )
@@ -1917,7 +1967,9 @@ def _ordered_entries(
             section=OPTIONAL_SECTION,
             url=candidate.url,
             label=candidate.label,
-            description=_describe(candidate.page.description, candidate.label, boilerplate),
+            description=_describe(
+                candidate.page.description, candidate.label, boilerplate, site_sentence
+            ),
             markdown=candidate.page.markdown,
             optional=True,
         )

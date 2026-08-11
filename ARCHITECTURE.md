@@ -382,7 +382,13 @@ section holding ranked `- [title](url): description` bullets, capped at `MAX_MAI
 * **Blockquote** — a sentence about the SITE, in its own words: the root page's own
   description (or, failing that, its first markdown paragraph), never a count of pages or a
   claim about the generator. A run whose root page has neither falls back to a plain count
-  sentence, the last resort rather than the norm.
+  sentence, the last resort rather than the norm. **Said once:** neither the free-prose block
+  below nor any bullet repeats it — both compare against it with `_is_near_identical` and drop
+  their own copy. The root page's bullet is the case that matters, because the blockquote and
+  that bullet read the same field, so before the check they were the same text by construction
+  whenever the root page had a description; on a one-page run the H1, blockquote, and lone bullet
+  between them stated two facts three times. `internals/enrich.py` made that near-certain rather
+  than occasional — an extracted homepage often has no description, an enriched one always does.
 * **The free-prose block** — llmstxt.org's own optional element: the root page's own first
   substantial paragraph, when it exists and is not near-identical to the blockquote (sites
   routinely lift `og:description` from their own hero copy). At most one block, often none. **The
