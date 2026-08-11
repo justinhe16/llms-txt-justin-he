@@ -761,6 +761,35 @@ async def test_patching_your_own_website_toggles_enrichment_and_returns_the_upda
     assert body["origin"] == created["origin"]
 
 
+async def test_patching_returns_owner_null_though_a_subsequent_get_resolves_it(
+    user_client: AsyncClient,
+) -> None:
+    """PATCH has the identical write/read asymmetry `test_a_non_owner_can_read_a_website_by_id`
+    pins for POST, and for the same reason: `WebsitesWriter.update`'s `RETURNING` row, like
+    `.insert`'s, carries no `auth.users` join — only `websites_reader.py`'s three DISPLAY
+    queries do — so a website answers `owner: null` on its own `PATCH` response and the real
+    owner on the very next `GET`. `service.py`'s `_owner_from_row` records why that gap is
+    deliberate rather than an oversight: this response can only ever describe the caller who
+    just wrote it (`require_owner` guarantees that), and that is exactly the row the frontend
+    already renders from the caller's own session, never from `owner`.
+    """
+    created = (
+        await user_client.post("/websites", json={"url": "https://patch-owner-gap.example"})
+    ).json()
+
+    patched = await user_client.patch(f"/websites/{created['id']}", json={"enrich_with_llm": True})
+    assert patched.status_code == 200
+    assert patched.json()["owner"] is None
+
+    response = await user_client.get(f"/websites/{created['id']}")
+    assert response.status_code == 200
+    assert response.json()["owner"] == {
+        "handle": TEST_USER_A_METADATA["user_name"],
+        "display_name": TEST_USER_A_METADATA["full_name"],
+        "avatar_url": TEST_USER_A_METADATA["avatar_url"],
+    }
+
+
 async def test_patching_another_users_website_is_403_and_the_stored_value_is_unchanged(
     user_client: AsyncClient, second_user_client: AsyncClient, websites_db: Pool
 ) -> None:

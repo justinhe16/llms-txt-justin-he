@@ -72,14 +72,27 @@ def _owner_from_row(row: dict[str, Any]) -> Owner | None:
     none of them, and `.get(...)` (never `row[...]`) is what lets this function build
     `owner=None` for those instead of raising `KeyError`.
 
+    So `POST /websites` and `PATCH /websites/{id}` both answer `owner: null` even for an
+    owner with full GitHub metadata — the join lives on the three DISPLAY queries above and
+    nowhere else. That is safe rather than merely absent: `POST` names the caller as owner by
+    construction, and `PATCH` reaches its `UPDATE` only after `require_owner`
+    (`update_website` below), so the one row either writer's `RETURNING` can ever describe is
+    the caller's own — and `frontend/lib/crawls/owner.ts`'s `ownerPill` renders that row from
+    the caller's live session (the `isYou` branch), never from `owner`. A `GET` immediately
+    after resolves the real owner regardless — see `test_a_non_owner_can_read_a_website_by_id`
+    (POST) and `test_patching_returns_owner_null_though_a_subsequent_get_resolves_it` (PATCH)
+    for both halves pinned end to end. Do not add the join to either writer's `RETURNING`,
+    and do not add a second query to fetch it — that is a second, diverging way to build the
+    `Owner` this file already builds once, for every read.
+
     The two fallback chains this applies — `user_name` then `preferred_username` for
     `handle`; `full_name` then `name` for `display_name` — are the same ones
     `frontend/lib/auth/use-user.ts` applies for the signed-in user's own session, so an
     owner is not named richly on their own row and anonymously on everyone else's.
 
     Returns `None`, not `Owner(handle=None, display_name=None, avatar_url=None)`, when all
-    three resolved fields are `None` — see `Owner.owner`'s own docstring for why that
-    collapse is the point rather than an equivalent shorthand for it.
+    three resolved fields are `None` — see `WebsiteResponse.owner`'s own docstring for why
+    that collapse is the point rather than an equivalent shorthand for it.
     """
     handle = row.get("owner_user_name") or row.get("owner_preferred_username")
     display_name = row.get("owner_full_name") or row.get("owner_name")
