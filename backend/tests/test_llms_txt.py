@@ -32,6 +32,7 @@ from app.features.crawl.internals.llms_txt import (
     MAX_MAIN_BODY_LINKS,
     MAX_PAGE_TEXT_BYTES,
     MAX_TEXT_CHARS,
+    OPTIONAL_SECTION,
     IndexCounts,
     PageSignals,
     count_full_txt_truncations,
@@ -876,15 +877,33 @@ def test_the_prose_block_omits_a_paragraph_near_identical_to_the_blockquote() ->
     assert lines[4] == "## Overview", "no prose-block paragraph between blockquote and heading"
 
 
-def test_the_optional_orientation_sentence_appears_only_when_optional_exists() -> None:
+def test_an_optional_section_adds_no_prose_about_the_document_itself() -> None:
+    """The inverse of the test this replaces. A previous revision emitted a fixed sentence
+    explaining the main-body/Optional convention whenever a run had an `## Optional` section;
+    it is deleted, and this pins that a run WITH Optional gets no header prose a run without it
+    would not also get. See the module docstring's "one free-prose slot" paragraph for why the
+    slot is reserved for the site rather than for the document.
+
+    Neither page here carries a description or markdown, so `_prose_paragraph` has nothing to
+    offer either run — which makes the presence of `## ` immediately after the blockquote the
+    whole assertion.
+    """
     with_optional = [
         _page("https://example.test/docs/a", title="A"),
         _page("https://example.test/privacy", title="Privacy Policy"),
     ]
     without_optional = [_page("https://example.test/docs/a", title="A")]
 
-    assert "grouped under Optional" in generate_llms_txt(with_optional, site_url=_SITE)
-    assert "grouped under Optional" not in generate_llms_txt(without_optional, site_url=_SITE)
+    for pages in (with_optional, without_optional):
+        lines = generate_llms_txt(pages, site_url=_SITE).splitlines()
+        assert lines[2].startswith("> ")
+        assert lines[3] == ""
+        assert lines[4] == "## Docs", "blockquote goes straight to the first heading"
+
+    both = generate_llms_txt(with_optional, site_url=_SITE)
+    assert f"## {OPTIONAL_SECTION}" in both, "the Optional section itself is untouched"
+    assert "grouped under Optional" not in both
+    assert "grouped by topic" not in both
 
 
 def test_no_prose_block_means_blockquote_goes_straight_to_the_first_heading() -> None:

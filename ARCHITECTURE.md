@@ -383,11 +383,17 @@ section holding ranked `- [title](url): description` bullets, capped at `MAX_MAI
   description (or, failing that, its first markdown paragraph), never a count of pages or a
   claim about the generator. A run whose root page has neither falls back to a plain count
   sentence, the last resort rather than the norm.
-* **The free-prose block** — llmstxt.org's own optional element, added by this ticket: the
-  root page's own first substantial paragraph, when it exists and is not near-identical to the
-  blockquote (sites routinely lift `og:description` from their own hero copy), and — only when
-  this run's index actually has an `## Optional` section — one fixed sentence explaining that
-  convention. Either, both, or neither may appear.
+* **The free-prose block** — llmstxt.org's own optional element: the root page's own first
+  substantial paragraph, when it exists and is not near-identical to the blockquote (sites
+  routinely lift `og:description` from their own hero copy). At most one block, often none. **The
+  slot carries information about the SITE, never about this document.** A previous revision also
+  emitted, on any run with an `## Optional` section, a fixed sentence explaining the
+  main-body/Optional convention; it was deleted rather than repaired, because it described the
+  document instead of the site (the same mistake as the crawl-exclusion clause the blockquote
+  used to carry), explained a convention llmstxt.org already standardizes, read identically on
+  every run, could not stay accurate as fixed text pointing at a variable section, and competed
+  with the site's own copy for the one slot the format allows. `internals/llms_txt.py`'s module
+  docstring has the full argument; read it before adding anything here.
 * **Sections** — a canonical taxonomy matched on URL path segments (`Overview`, `Product`,
   `Docs`, `Guides`, `API`, `Reference`, `Research & Data`, `Comparisons`, `Customers`,
   `Company`, `Blog`, in that order), falling back to the leading path segment humanized for
