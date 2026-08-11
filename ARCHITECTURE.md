@@ -701,6 +701,20 @@ a site larger than the budget it always will. The provenance panel keys its Fetc
 `dropped["over_limit"]` for that reason (`provenance-copy.ts`'s `fetchCapNote`), so it no
 longer prints "no cap was hit" under a table reading "-252 Over the page limit".
 
+**Each stats counter belongs to the stage whose total its pages are inside, and the Fetch
+stage's `notAttempted` is a residual that enforces it.** `fetch_frontier_url` has four ways to
+spend a selected URL without producing a page — an exception (`pages_failed`), a WAF challenge
+(`pages_blocked`), an honest non-2xx (`pages_http_error`), a cross-origin redirect
+(`pages_off_origin`) — and all four are counted in place of `pages.append`, so none reaches
+`pages_crawled`. All four are therefore Fetch segments, and all four are subtracted from
+`notAttempted = urls_selected - frontierFetched - ...`; the Index stage accounts only for pages
+that ARE in `pages_crawled` (`links_emitted`, `links_optional`, `pages_empty_content`,
+`links_duplicate`, closing to it exactly). Getting this wrong does not leave a gap in the
+panel, it produces a confident wrong number: version 12 added the last two counters to the
+Index stage, where they overstated its total, and left them out of the Fetch residual, where
+they were reported as "Not attempted" for URLs that had been attempted. A counter added to
+`internals/crawler.py` obliges a matching term in exactly one of these two stages.
+
 **A row written before version 9 degrades to its totals, not to nothing.** Absence of the
 `dropped` key means exactly one thing — this row predates version 9 — and `urls_discovered`,
 `urls_selected` (version 4) and `urls_robots_disallowed` (version 6) are all still on it, so

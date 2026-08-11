@@ -245,9 +245,20 @@ export function capHitCopy(capHit: string | null): string {
  * split) falls through to `capHitCopy` unchanged rather than guessing — a version-9-or-earlier
  * row genuinely does not record which rule dropped what.
  *
- * `failed` is taken as well, because a budget that was spent and a page that failed are
- * independent facts and the sentence has to be true of both — see the comment on the branch
- * itself.
+ * **The lead sentence is gated on `notAttempted`, not on any single outcome.** It is a claim
+ * about the whole frontier, so the only sound gate is the funnel's own residual: nonzero means
+ * some selected URL went unreached, whatever the reason, and the sentence must not be printed
+ * beside the legend row counting them. It was gated on `failed` alone, on the reasoning that a
+ * failure was the only way a `cap_hit: null` run could leave a selected URL unfetched — true
+ * when written, false one stats version later, and it shipped "Every page this run selected was
+ * fetched" onto a panel whose own legend read "Not attempted 2". A guard naming one outcome has
+ * to be revisited every time a new one is added; a guard reading the residual does not.
+ *
+ * The two true states are then distinguished rather than flattened, because "attempted" is a
+ * weaker claim than "fetched" and should not be paid on a run that earned the stronger one: a
+ * run where every selected URL came back as a page gets "fetched", and one where some answered
+ * with a 404, a WAF challenge, another host, or an error gets "attempted" — which is exactly
+ * what the Fetch legend beside it is showing.
  *
  * Still bound by ARCHITECTURE.md §3.4: the budget being spent is a SUCCESS. "Reached", never
  * "cut off", "stopped short" or "hit its limit" — and the sentence leads with the pages that
@@ -256,21 +267,22 @@ export function capHitCopy(capHit: string | null): string {
 export function fetchCapNote(
   capHit: string | null,
   overLimit: number | null,
-  failed: number
+  fetch: {
+    notAttempted: number;
+    failed: number;
+    blocked: number;
+    httpError: number;
+    offOrigin: number;
+  }
 ): string {
   if (capHit === null && overLimit !== null && overLimit > 0) {
     const budget = `This run's page budget was reached at selection rather than here — ${overLimit.toLocaleString()} ranked ${overLimit === 1 ? "URL" : "URLs"} did not fit into the frontier, so the fetch loop never had a cap left to reach.`;
-    // `failed` is why this is not one sentence. `pages_failed` is incremented by
-    // `fetch_frontier_url`'s own `except Exception` (`internals/crawler.py`) and has nothing
-    // to do with any cap — a frontier URL can fail on a network error, a non-2xx, or an SSRF
-    // refusal on a run that tripped nothing. And on a `cap_hit: null` run it is the ONLY way a
-    // selected URL goes unfetched: no task short-circuited on the `cap_hit is not None` guard,
-    // so every one of them was attempted and `frontierFetched + failed === urlsSelected`
-    // exactly. Leading with "every page this run selected was fetched" there would put a false
-    // claim directly beside the `Failed` legend entry counting the ones that were not — the
-    // same shape of contradiction this whole function exists to remove, reintroduced one state
-    // over.
-    return failed > 0 ? budget : `Every page this run selected was fetched. ${budget}`;
+    if (fetch.notAttempted > 0) return budget;
+    const everyOneLanded =
+      fetch.failed + fetch.blocked + fetch.httpError + fetch.offOrigin === 0;
+    return everyOneLanded
+      ? `Every page this run selected was fetched. ${budget}`
+      : `Every URL this run selected was attempted. ${budget}`;
   }
   return capHitCopy(capHit);
 }
@@ -396,11 +408,16 @@ export const PROVENANCE_SEGMENTS = {
   frontier: "From the frontier",
   failed: "Failed",
   blocked: "Blocked",
+  // Fetch-stage segments, not Index ones, and they were Index ones until a live run showed
+  // why that could not hold: `internals/crawler.py` counts each of these in place of
+  // `pages.append`, so the page is not in `pages_crawled` and the Index stage's bar was
+  // summing two pages it did not contain. Both keep the noun they had — the fact each one
+  // names is unchanged — minus the "Omitted:" prefix, which belonged to the stage they left.
+  httpError: "Not a page",
+  offOrigin: "Another site",
   notAttempted: "Not attempted",
   listed: "Listed in llms.txt",
   omittedEmpty: "Omitted as empty",
-  omittedHttpError: "Omitted: not a page",
-  omittedOffOrigin: "Omitted: another site",
   // `RUN_STATS_VERSION` 13 (the curated-index ticket): a page grouped under `## Optional` is
   // carried forward into the artifact, not lost — it names a FACT ("this page is here, just
   // not in the main body"), never failure language, the same rule every segment on this list

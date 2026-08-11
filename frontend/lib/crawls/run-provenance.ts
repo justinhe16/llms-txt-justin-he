@@ -94,17 +94,6 @@ export type IndexState =
       kind: "stored";
       indexed: number;
       omittedEmpty: number;
-      /** `stats.pages_http_error` (`RUN_STATS_VERSION` 12) — fetched pages whose response was
-       * not a 2xx and which `internals/blocked.py` did not classify as an access block: an
-       * honest `404`, `429`, or `5xx`. `0` on rows written before version 12, which is
-       * indistinguishable from "none happened" and is the right reading either way: those
-       * runs collected such pages into the index instead of excluding them, so there is no
-       * exclusion to report. */
-      omittedHttpError: number;
-      /** `stats.pages_off_origin` (`RUN_STATS_VERSION` 12) — fetched pages that were requested
-       * on this site and answered by a different host. `0` on pre-version-12 rows, read the
-       * same way as `omittedHttpError`. */
-      omittedOffOrigin: number;
       /** `stats.links_optional` (`RUN_STATS_VERSION` 13) — pages the curated index demoted to
        * `## Optional` rather than the main body: still LISTED, still in `llms.txt` and
        * `llms-full.txt`, just not in the curated top. `null`, NEVER `0`, on a pre-version-13
@@ -179,8 +168,38 @@ export interface FetchInfo {
    * frontier-page count; `lib/crawls/provenance-copy.ts`'s `blockedReasonCopy` turns it into
    * a sentence. */
   blockedReason: string | null;
+  /** `stats.pages_http_error` (`RUN_STATS_VERSION` 12), attributed to the FRONTIER — a
+   * selected URL that answered with an honest `404`, `429` or `5xx`, one
+   * `internals/blocked.py` declined to call an access block. A Fetch-stage number rather than
+   * an Index-stage one, and that distinction is the whole point: `internals/crawler.py`
+   * counts one of these in place of `pages.append`, so it never reaches `pages_crawled` and
+   * the Index stage has nothing to say about it. It is a selected URL that WAS attempted and
+   * yielded no page — exactly the shape `blocked` already has.
+   *
+   * **Frontier-attributed, because the stored counter is not.** `pages_http_error` also
+   * counts a SEED that answered non-2xx, and the seed is never a member of `selected`, so
+   * subtracting the raw counter from `urlsSelected` would undercount by one on exactly those
+   * runs. `seedFetched` separates the two cleanly and without a new stored key: a seed that
+   * landed was a 2xx by construction (a non-2xx seed is counted and then never appended), so
+   * when `seedFetched` is true every one of these came from the frontier; and when it is
+   * false the frontier never ran at all — it lives inside the seed fetch's own `else` branch
+   * — so none of them did. */
+  httpError: number;
+  /** `stats.pages_off_origin` (`RUN_STATS_VERSION` 12) — a selected URL that was requested on
+   * this site and answered by a different host. Counted in place of `pages.append` exactly as
+   * `httpError` is, and read the same way. Frontier-only at the source, so it needs no
+   * attribution rule: the seed is deliberately exempt from the redirect check
+   * (`_redirected_off_origin` — a site that moved wholesale is crawled where it moved to). */
+  offOrigin: number;
   /** Selected but never attempted — nonzero only when a cap ended the run before the whole
-   * frontier was fetched. Render this row only when it is `> 0`. */
+   * frontier was fetched. Render this row only when it is `> 0`.
+   *
+   * **This is the residual, which is why every other outcome above has to be subtracted from
+   * it.** It is `urlsSelected` minus everything the funnel can name, so an outcome the
+   * formula does not enumerate does not go missing — it silently lands here and is rendered
+   * under a label that is false of it. That has now happened twice: to `blocked` at version
+   * 11, and to `httpError`/`offOrigin` at version 12. Both are enumerated above for that
+   * reason, and a version 14 that adds a third had better arrive with a line here. */
   notAttempted: number;
   bytesFetched: number | null;
   /** The raw `cap_hit` value (`"pages"` | `"bytes"` | `"wall_clock"`), or `null` when no cap
@@ -360,26 +379,27 @@ export function selectionSelected(selection: SelectionState): number | null {
  *   (a): the seed has to be its own visible term in the funnel, or "selected -> fetched" reads
  *   as broken arithmetic. `frontierFetched` below is `pagesCrawled - 1` for exactly this
  *   reason — it excludes the seed so the comparison against `urlsSelected` is honest.
- * * `indexed + listedOptional + omittedEmpty + omittedHttpError + omittedOffOrigin +
- *   omittedDuplicate === pagesCrawled` is the version-13 form of an invariant that started with
- *   two terms and has now grown twice. It gained two terms when the crawler began excluding
- *   non-2xx responses and cross-origin redirects from the index (`RUN_STATS_VERSION` 12): with
- *   only `omittedEmpty` to spend it on, the whole `pagesCrawled - indexed` gap was implicitly
- *   attributed to empty content, so a run that dropped four rate-limited pages reported four
- *   pages with "no extractable content" — the same false claim version 11 was written to stop
- *   making about blocked pages. It gains two MORE at version 13, for a different reason than
- *   either previous two: a curated index (`internals/llms_txt.py`) can now DEMOTE a page to
- *   `## Optional` (`listedOptional` — still indexed, so it is additive with `indexed` rather
- *   than a fourth omission) or collapse it into a duplicate's survivor (`omittedDuplicate` — a
- *   fourth genuine omission reason, invisible to every one of the first three because a
- *   deduped page is fetched, on-origin, non-empty, and a 2xx). Every term is an independently
- *   recorded fact — `stats.links_emitted`, `stats.links_optional`, `stats.pages_empty_content`,
- *   `stats.pages_http_error`, `stats.pages_off_origin`, and `stats.links_duplicate` — rather
- *   than one derived from the others, matching `links_emitted`'s own docstring: "ask the
- *   artifact what it listed; do not reconstruct it." On a pre-version-13 row, `listedOptional`
- *   and `omittedDuplicate` are both `null` rather than `0` — see `IndexState`'s own docstring —
- *   so the six-term sum is not evaluable on such a row; the four-term version above still holds
- *   for it.
+ * * `indexed + listedOptional + omittedEmpty + omittedDuplicate === pagesCrawled` is the
+ *   Index stage's reconciliation, and every one of its four terms is a fact about a page that
+ *   IS in `pages_crawled`. `pages_empty_content` is counted over `CrawlResult.pages`
+ *   (`internals/crawler.py`), and `links_emitted`/`links_optional`/`links_duplicate` all come
+ *   from one `_select` pass over that same list (`internals/llms_txt.py`'s
+ *   `count_indexed_pages`), whose only exclusion that can still bite there is `is_empty` —
+ *   non-2xx and off-origin are already gone before the list is built.
+ *
+ *   **`pages_http_error` and `pages_off_origin` are deliberately NOT terms here, and used to
+ *   be.** They read as index omissions, but `internals/crawler.py` counts each one in place of
+ *   `pages.append` — `run_stats.py` says it outright: "excluded from `pages_crawled` as well as
+ *   from the index." Summing them into a total whose denominator they were never part of
+ *   overshot it by exactly their own count, and the same two pages were then drawn a second
+ *   time in the Fetch stage's residual. They are Fetch-stage facts about a URL that was
+ *   attempted, and they now live there — see `FetchInfo.httpError`.
+ *
+ *   Every term is an independently recorded fact rather than one derived from the others,
+ *   matching `links_emitted`'s own docstring: "ask the artifact what it listed; do not
+ *   reconstruct it." On a pre-version-13 row, `listedOptional` and `omittedDuplicate` are both
+ *   `null` rather than `0` — see `IndexState`'s own docstring — so the four-term sum is not
+ *   evaluable on such a row; `indexed + omittedEmpty === pagesCrawled` is what holds for it.
  *
  * ## Fetch
  *
@@ -387,17 +407,33 @@ export function selectionSelected(selection: SelectionState): number | null {
  * `internals/crawler.py`'s own comment on why an empty `pages` list is exactly equivalent to
  * "the seed never landed": every later append happens after a successful seed fetch, so there
  * is no other way to end up with pages fetched at all without the seed being one of them.
- * `frontierFetched = Math.max(0, pagesCrawled - 1)`. **A blocked frontier page counts on
- * `blocked` (`stats.pages_blocked`, `RUN_STATS_VERSION` 11), not on `frontierFetched`** —
- * `internals/crawler.py`'s frontier loop counts it and leaves it out of `CrawlResult.pages`,
- * the same "counted but not fetched-successfully" shape `failed` already has, so
- * `notAttempted = Math.max(0, urlsSelected - frontierFetched - failed - blocked)` is the
- * corrected reconciliation: every selected URL is now accounted for by exactly one of
- * frontier-fetched, failed, blocked, or not-attempted. Nonzero only when a cap ended the run
- * before the whole selected frontier was fetched — render that row only when it is greater
- * than zero. `Math.max(0, …)` throughout is a clamp against a stats row whose numbers
- * disagree, the same clamp rationale `stats-display.ts`'s `outcomeBreakdown` gives for its
- * own remainder.
+ * `frontierFetched = Math.max(0, pagesCrawled - 1)`. **`fetch_frontier_url`
+ * (`internals/crawler.py`) has FOUR ways to spend a selected URL without appending a page,
+ * and `notAttempted` is the residual, so all four have to be named or the unnamed ones land
+ * in it wearing a label that is false of them.** An exception counts on `pages_failed`; a
+ * detected WAF challenge on `pages_blocked` (version 11); an honest non-2xx on
+ * `pages_http_error` and a cross-origin redirect on `pages_off_origin` (version 12). All four
+ * share one shape — counted, and then returned from in place of `pages.append`, so none of
+ * them reaches `pages_crawled`. Hence
+ *
+ * ```
+ * notAttempted = max(0, urlsSelected - frontierFetched - failed - blocked - httpError - offOrigin)
+ * ```
+ *
+ * every selected URL accounted for by exactly one of frontier-fetched, failed, blocked,
+ * not-a-page, another-site, or not-attempted. Nonzero only when a cap ended the run before the
+ * whole selected frontier was attempted — render that row only when it is greater than zero.
+ *
+ * **The last two terms were missing, and a live run is what found it.** Version 11 added
+ * `blocked` to this formula for exactly this reason; version 12 added two more counters of the
+ * same shape and did not. A 100-page run that selected 99 URLs, fetched 97 of them, and had
+ * two answer with a non-2xx reported "Not attempted 2" under a note reading "Every page this
+ * run selected was fetched" — two pages that were attempted, described as not attempted,
+ * beside a sentence saying they were. Adding a counter to `internals/crawler.py` without
+ * adding it here does not produce a gap in this panel; it produces a confident wrong number.
+ *
+ * `Math.max(0, …)` throughout is a clamp against a stats row whose numbers disagree, the same
+ * clamp rationale `stats-display.ts`'s `outcomeBreakdown` gives for its own remainder.
  *
  * ## The cap the Fetch stage cannot see
  *
@@ -458,10 +494,14 @@ export function runProvenance(run: Pick<RunDetail, "status" | "stats">): RunProv
 
   const seedFetched = pagesCrawled !== null && pagesCrawled > 0;
   const frontierFetched = pagesCrawled === null ? 0 : Math.max(0, pagesCrawled - 1);
+  // Frontier-attributed, never the raw counter — see `FetchInfo.httpError` for why a seed's
+  // own non-2xx must not be subtracted from a total the seed was never part of.
+  const httpError = seedFetched ? (finiteNumber(stats.pages_http_error) ?? 0) : 0;
+  const offOrigin = finiteNumber(stats.pages_off_origin) ?? 0;
   const notAttempted =
     urlsSelected === null
       ? 0
-      : Math.max(0, urlsSelected - frontierFetched - failed - blocked);
+      : Math.max(0, urlsSelected - frontierFetched - failed - blocked - httpError - offOrigin);
 
   const index: IndexState =
     run.status !== "completed"
@@ -470,8 +510,6 @@ export function runProvenance(run: Pick<RunDetail, "status" | "stats">): RunProv
           kind: "stored",
           indexed: finiteNumber(stats.links_emitted) ?? 0,
           omittedEmpty: finiteNumber(stats.pages_empty_content) ?? 0,
-          omittedHttpError: finiteNumber(stats.pages_http_error) ?? 0,
-          omittedOffOrigin: finiteNumber(stats.pages_off_origin) ?? 0,
           // NEVER `?? 0` — see `IndexState`'s own docstring for why `null` on a pre-version-13
           // row must survive as `null` rather than being read as "this run had none."
           listedOptional: finiteNumber(stats.links_optional),
@@ -490,6 +528,8 @@ export function runProvenance(run: Pick<RunDetail, "status" | "stats">): RunProv
       failed,
       blocked,
       blockedReason,
+      httpError,
+      offOrigin,
       notAttempted,
       bytesFetched,
       capHit,

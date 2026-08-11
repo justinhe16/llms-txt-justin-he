@@ -419,14 +419,23 @@ site's index."
 an always-Optional rule (legal boilerplate, brand assets, archives) or by the main-body cap,
 never dropped from the artifact entirely. `links_duplicate` is how many fetched, on-origin,
 non-empty, 2xx pages this run's OWN dedup pass collapsed into an already-kept survivor —
-fetched, real, and still not a link anywhere in the artifact, which is what makes it the fourth
-member of a family `pages_http_error`/`pages_off_origin` (version 12) already started: a named
-reason a fetched page did not reach the index, so `pages_crawled` minus every one of these four
-reasons (`pages_empty_content`, `pages_http_error`, `pages_off_origin`, `links_duplicate`)
-minus `links_emitted` minus `links_optional` closes to zero, which
-`frontend/lib/crawls/run-provenance.ts`'s own invariant test now asserts directly (that file's
-own module docstring numbers the reasons it can name; this ticket adds the fourth it was
-missing, alongside the fifth "listed under Optional" bucket that is not an EXCLUSION at all).
+fetched, real, and still not a link anywhere in the artifact, which makes it the SECOND named
+reason a page that is in `pages_crawled` did not reach the index. `pages_empty_content` is the
+first, and the two of them are the whole list: `pages_crawled` minus `pages_empty_content`
+minus `links_duplicate` minus `links_emitted` minus `links_optional` closes to zero, which
+`frontend/lib/crawls/run-provenance.ts`'s own invariant test asserts directly.
+
+**`pages_http_error` and `pages_off_origin` are NOT members of that sum, however much they
+read like siblings of `links_duplicate`.** They belong to the FETCH stage, not the index one:
+`internals/crawler.py` counts each in place of `pages.append`, so — as this docstring's own
+version-12 paragraph says above — they are "excluded from `pages_crawled` as well as from the
+index," and a page that never entered the total cannot be subtracted from it. Adding them
+overstates the sum by their own count, and the frontend did exactly that for two versions: its
+index bar drew two pages it did not contain, while its fetch stage drew those same two pages a
+second time in a residual labelled "Not attempted" — of two URLs it had attempted. The test in
+`run-provenance.test.ts` was green throughout, on a fixture carrying counts no real run can
+produce. The rule worth carrying forward: a new counter belongs to whichever stage's total its
+pages are actually inside, and adding one here obliges a matching term in that stage.
 
 Both new keys are recorded on every completed OR partially-completed row from this version
 onward — `internals/llms_txt.py`'s `IndexCounts` is what only that module can compute, and

@@ -191,13 +191,14 @@ const SEGMENT_FILL = {
   // is not a failure this crawler committed, so it shares `dropped`/`notAttempted`'s grey
   // rather than `failed`'s rose.
   blocked: "bg-muted-foreground/25",
+  // Same neutral grey `blocked` takes, and for the same reason — these sit beside it in the
+  // Fetch bar now: a 404 or a cross-origin redirect is a response this run correctly declined
+  // to index, not something that went wrong. Never `failed`'s rose.
+  httpError: "bg-muted-foreground/25",
+  offOrigin: "bg-muted-foreground/25",
   notAttempted: "bg-muted-foreground/25",
   listed: "bg-chart-1",
   omittedEmpty: "bg-muted-foreground/25",
-  // Same neutral grey as every other omission: a 404 or a cross-origin redirect is a
-  // page this run correctly declined to index, not something that went wrong.
-  omittedHttpError: "bg-muted-foreground/25",
-  omittedOffOrigin: "bg-muted-foreground/25",
   // `bg-chart-3`, NOT the grey every omission above uses — a page under `## Optional` is
   // carried FORWARD into the artifact, not lost, the same "carried forward but distinguished"
   // fill `seed` already uses above.
@@ -358,6 +359,8 @@ function funnelStages(provenance: RunProvenance, status: RunDetail["status"]): F
         { key: "frontier", value: fetch.frontierFetched },
         { key: "failed", value: fetch.failed },
         { key: "blocked", value: fetch.blocked },
+        { key: "httpError", value: fetch.httpError },
+        { key: "offOrigin", value: fetch.offOrigin },
         { key: "notAttempted", value: fetch.notAttempted },
       ],
       // A failed run names its failure rather than a cap that never actually ended it — a run
@@ -375,7 +378,7 @@ function funnelStages(provenance: RunProvenance, status: RunDetail["status"]): F
           ? fetch.blockedReason !== null
             ? blockedReasonCopy(fetch.blockedReason).explanation
             : "This run failed before fetching finished."
-          : fetchCapNote(fetch.capHit, provenance.overLimit, fetch.failed),
+          : fetchCapNote(fetch.capHit, provenance.overLimit, fetch),
       // A completed run with one or more blocked FRONTIER pages gets one extra sentence
       // explaining what "Blocked" in the legend means — the failed-run case above already
       // says this as the stage's own `note`, so this only fires when the run did not fail.
@@ -404,8 +407,6 @@ function funnelStages(provenance: RunProvenance, status: RunDetail["status"]): F
               { key: "listed", value: index.indexed },
               { key: "listedOptional", value: index.listedOptional ?? 0 },
               { key: "omittedEmpty", value: index.omittedEmpty },
-              { key: "omittedHttpError", value: index.omittedHttpError },
-              { key: "omittedOffOrigin", value: index.omittedOffOrigin },
               { key: "omittedDuplicate", value: index.omittedDuplicate ?? 0 },
             ]
           : [],
