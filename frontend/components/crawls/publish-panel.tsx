@@ -1,9 +1,23 @@
 "use client";
 
 import { useEffect, useId, useState } from "react";
-import { CheckIcon, ExternalLinkIcon, GitPullRequestIcon, Lock, XIcon } from "lucide-react";
+import {
+  CheckIcon,
+  ChevronDownIcon,
+  ExternalLinkIcon,
+  GitPullRequestIcon,
+  Lock,
+  XIcon,
+} from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
@@ -217,6 +231,76 @@ function ConnectPrompt({
 }
 
 /**
+ * The picker both fields below use — the same control the Output tab's run picker is: a
+ * `DropdownMenu` with a `DropdownMenuRadioGroup` inside it, opened by an outline `Button`.
+ *
+ * A native `<select>` would be fewer lines and is what these two fields were first. It is not what
+ * the rest of this application means by a dropdown, though, and that difference is not cosmetic
+ * here: this field names the repository a robot will open pull requests against, so it has to look
+ * like a control whose options are a fixed, known list rather than a box that happens to have an
+ * arrow. `output-tab.tsx`'s `RunPicker` established the shape; this reuses it rather than
+ * introducing a third kind of dropdown.
+ *
+ * `type="button"` is load-bearing: this trigger lives inside a `<form>`, where a button with no
+ * type submits it.
+ */
+function PickerField({
+  id,
+  value,
+  placeholder,
+  options,
+  disabled,
+  onSelect,
+}: {
+  id: string;
+  /** The selected option's `value`, or `""` for none — in which case the trigger shows
+   * `placeholder`. What the trigger renders is that option's `label`, never `value` itself: the
+   * account picker's value is an installation uuid, which is exactly the thing a person must not
+   * be shown. */
+  value: string;
+  placeholder: string;
+  options: { value: string; label: string }[];
+  disabled: boolean;
+  onSelect: (value: string) => void;
+}) {
+  const selected = options.find((option) => option.value === value);
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          id={id}
+          type="button"
+          variant="outline"
+          disabled={disabled}
+          className="w-full justify-between gap-3 font-normal"
+        >
+          <span
+            className={cn("min-w-0 truncate", selected === undefined && "text-muted-foreground")}
+          >
+            {selected?.label ?? placeholder}
+          </span>
+          <ChevronDownIcon aria-hidden />
+        </Button>
+      </DropdownMenuTrigger>
+      {/* Capped and scrollable, and allowed to outgrow its trigger — an installation may grant a
+          hundred repositories, and `owner/repository` is longer than the field is wide more often
+          than not. Same sizing `RunPicker` arrived at, including the `2.75rem` each row spends on
+          the radio checkmark that the trigger does not. */}
+      <DropdownMenuContent className="max-h-80 w-auto max-w-(--radix-dropdown-menu-content-available-width) min-w-[calc(var(--radix-dropdown-menu-trigger-width)+2.75rem)] overflow-y-auto">
+        <DropdownMenuRadioGroup value={value} onValueChange={onSelect}>
+          {options.map((option) => (
+            <DropdownMenuRadioItem key={option.value} value={option.value} className="py-1.5">
+              <span className="whitespace-nowrap">{option.label}</span>
+            </DropdownMenuRadioItem>
+          ))}
+        </DropdownMenuRadioGroup>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+/**
  * States 2 and 3: the form.
  *
  * Local state seeded from `existing` and re-seeded when it changes — `useEffect` on the target's
@@ -325,25 +409,23 @@ function TargetForm({
           <Label htmlFor={`${pathId}-account`} className="text-xs">
             GitHub account
           </Label>
-          <select
+          <PickerField
             id={`${pathId}-account`}
             value={installationId}
+            placeholder="Select an account"
+            options={installations.map((installation) => ({
+              value: installation.id,
+              label: installation.account_login,
+            }))}
             disabled={disabled}
-            onChange={(event) => {
-              setInstallationId(event.target.value);
+            onSelect={(id) => {
+              setInstallationId(id);
               // Clear the repository: it belonged to the previous account's installation and
               // almost certainly is not reachable from the new one.
               setRepo("");
               setBranch("");
             }}
-            className="h-9 w-full rounded-md border border-border bg-background px-3 text-sm"
-          >
-            {installations.map((installation) => (
-              <option key={installation.id} value={installation.id}>
-                {installation.account_login}
-              </option>
-            ))}
-          </select>
+          />
         </div>
       )}
 
@@ -351,31 +433,25 @@ function TargetForm({
         <Label htmlFor={`${pathId}-repo`} className="text-xs">
           Repository
         </Label>
-        {/* A `<select>` when we can list every repository the installation grants, and a free-text
-            field when we cannot. The list can be truncated at 100 (the API says so with
-            `truncated`) or fail outright, and a picker that silently omits the repository someone
-            wanted is worse than a text box — but that is the rare case, and paying for it with a
-            free-text field on the common one made the normal path look like it wanted a repository
-            typed out by hand. */}
+        {/* A picker when we can list every repository the installation grants, and a free-text
+            field when we cannot. The set of repositories is a decision the user already made on
+            GitHub, and it is the entire set of destinations that can work at all — a field you can
+            type into implies some other repository might be reachable if only you spelled it
+            right, and typing one buys a `404` at publish time.
+
+            The exception is an installation granting more repositories than one page carries (the
+            API says so with `truncated`) or a repositories call that failed: there the list
+            genuinely is not the whole list, and a picker that silently omits what someone wanted
+            is worse than a text box. */}
         {canPickRepo ? (
-          <select
+          <PickerField
             id={`${pathId}-repo`}
             value={repo}
-            disabled={disabled || repositories.isPending}
-            onChange={(event) => chooseRepo(event.target.value)}
-            className="h-9 w-full rounded-md border border-border bg-background px-3 text-sm"
-          >
-            {/* Kept selectable-but-disabled rather than omitted, so an unconfigured form opens on
-                a prompt instead of silently pointing at whichever repository sorts first. */}
-            <option value="" disabled>
-              {repositories.isPending ? "Loading repositories…" : "Select a repository"}
-            </option>
-            {repoOptions.map((candidate) => (
-              <option key={candidate} value={candidate}>
-                {candidate}
-              </option>
-            ))}
-          </select>
+            placeholder={repositories.isPending ? "Loading repositories…" : "Select a repository"}
+            options={repoOptions.map((candidate) => ({ value: candidate, label: candidate }))}
+            disabled={disabled || repositories.isPending || repoOptions.length === 0}
+            onSelect={chooseRepo}
+          />
         ) : (
           <>
             <Input
@@ -392,6 +468,12 @@ function TargetForm({
               ))}
             </datalist>
           </>
+        )}
+        {canPickRepo && !repositories.isPending && repoOptions.length === 0 && (
+          <p className="text-xs text-muted-foreground">
+            This installation doesn&apos;t grant access to any repository yet. Add one in your
+            GitHub settings, then reopen this tab.
+          </p>
         )}
         {repositories.data?.truncated === true && (
           <p className="text-xs text-muted-foreground">
