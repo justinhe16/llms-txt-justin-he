@@ -38,6 +38,24 @@ describe("ownerPill — somebody else's row", () => {
     expect(pill.isIdentified).toBe(true);
   });
 
+  it("shows the handle in the tooltip too, the same as your own row does", () => {
+    // The asymmetry this replaces: every pill but your own used to hover a raw UUID, so the
+    // one hover that named a person was the one on the row you already knew.
+    const pill = ownerPill(USER_ID, null, owner({ handle: "octocat" }));
+
+    expect(pill.tooltip).toBe("@octocat");
+    expect(pill.tooltipIsRawId).toBe(false);
+  });
+
+  it("keeps the raw user id in the tooltip for an owner known only by display name", () => {
+    // No handle to show, and `text` is already the display name, so the full id is the only
+    // thing a hover can add here.
+    const pill = ownerPill(USER_ID, null, owner({ display_name: "Ada Lovelace" }));
+
+    expect(pill.tooltip).toBe(USER_ID);
+    expect(pill.tooltipIsRawId).toBe(true);
+  });
+
   it("falls back to the display name when there is no handle", () => {
     const pill = ownerPill(USER_ID, null, owner({ display_name: "Ada Lovelace" }));
 
