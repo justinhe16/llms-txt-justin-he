@@ -264,6 +264,29 @@ function TargetForm({
   const repositories = useRepositories(installationId === "" ? null : installationId);
   const disabled = disabledReason !== null;
 
+  const repoNames = (repositories.data?.repositories ?? []).map(
+    (candidate) => `${candidate.owner}/${candidate.name}`
+  );
+  // The saved repository stays selectable even when it is not in the list GitHub just returned —
+  // an installation whose access was edited would otherwise render a blank `<select>` over a value
+  // the form still holds and would still save.
+  const repoOptions = repo !== "" && !repoNames.includes(repo) ? [...repoNames, repo] : repoNames;
+  // Whether the list we have IS the whole list. `truncated` says it is not, and an error means we
+  // have no list at all; either way the field has to accept a name we cannot offer.
+  const canPickRepo = !repositories.isError && repositories.data?.truncated !== true;
+
+  // Choosing a repository prefills the branch from that repository's own default the moment one is
+  // recognized. Storing it rather than resolving it per run is deliberate on the backend (a
+  // default-branch rename must not silently retarget a publication), so this is the one place the
+  // default is read at all.
+  const chooseRepo = (value: string) => {
+    setRepo(value);
+    const match = (repositories.data?.repositories ?? []).find(
+      (candidate) => `${candidate.owner}/${candidate.name}` === value
+    );
+    if (match !== undefined) setBranch(match.default_branch);
+  };
+
   // `owner/name`, split at the FIRST slash only. A repository name cannot contain one, so
   // everything after the first is invalid input rather than part of the name — and the backend's
   // `_REPO_SEGMENT` will reject it, which is where that decision belongs.
@@ -328,33 +351,48 @@ function TargetForm({
         <Label htmlFor={`${pathId}-repo`} className="text-xs">
           Repository
         </Label>
-        {/* A `datalist` rather than a `<select>`: the repository list can be truncated at 100
-            (the API says so with `truncated`), and an installation with more than that needs a
-            field the user can type into. One control that both suggests and accepts free text is
-            strictly better than a picker that silently omits the repository they wanted. */}
-        <Input
-          id={`${pathId}-repo`}
-          list={`${pathId}-repos`}
-          value={repo}
-          disabled={disabled}
-          placeholder="owner/repository"
-          onChange={(event) => {
-            setRepo(event.target.value);
-            const match = (repositories.data?.repositories ?? []).find(
-              (candidate) => `${candidate.owner}/${candidate.name}` === event.target.value
-            );
-            // Prefill the branch from the repository's own default the moment one is recognized.
-            // Storing it rather than resolving it per run is deliberate on the backend (a
-            // default-branch rename must not silently retarget a publication), so this is the one
-            // place the default is read at all.
-            if (match !== undefined) setBranch(match.default_branch);
-          }}
-        />
-        <datalist id={`${pathId}-repos`}>
-          {(repositories.data?.repositories ?? []).map((candidate) => (
-            <option key={`${candidate.owner}/${candidate.name}`} value={`${candidate.owner}/${candidate.name}`} />
-          ))}
-        </datalist>
+        {/* A `<select>` when we can list every repository the installation grants, and a free-text
+            field when we cannot. The list can be truncated at 100 (the API says so with
+            `truncated`) or fail outright, and a picker that silently omits the repository someone
+            wanted is worse than a text box — but that is the rare case, and paying for it with a
+            free-text field on the common one made the normal path look like it wanted a repository
+            typed out by hand. */}
+        {canPickRepo ? (
+          <select
+            id={`${pathId}-repo`}
+            value={repo}
+            disabled={disabled || repositories.isPending}
+            onChange={(event) => chooseRepo(event.target.value)}
+            className="h-9 w-full rounded-md border border-border bg-background px-3 text-sm"
+          >
+            {/* Kept selectable-but-disabled rather than omitted, so an unconfigured form opens on
+                a prompt instead of silently pointing at whichever repository sorts first. */}
+            <option value="" disabled>
+              {repositories.isPending ? "Loading repositories…" : "Select a repository"}
+            </option>
+            {repoOptions.map((candidate) => (
+              <option key={candidate} value={candidate}>
+                {candidate}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <>
+            <Input
+              id={`${pathId}-repo`}
+              list={`${pathId}-repos`}
+              value={repo}
+              disabled={disabled}
+              placeholder="owner/repository"
+              onChange={(event) => chooseRepo(event.target.value)}
+            />
+            <datalist id={`${pathId}-repos`}>
+              {repoNames.map((candidate) => (
+                <option key={candidate} value={candidate} />
+              ))}
+            </datalist>
+          </>
+        )}
         {repositories.data?.truncated === true && (
           <p className="text-xs text-muted-foreground">
             This installation has more repositories than we can list — type the full{" "}
