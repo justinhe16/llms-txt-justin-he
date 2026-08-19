@@ -1644,6 +1644,20 @@ fly scale count app=1 worker=1 --app llms-text-justin-he      # if a process gro
 here instead, because two copies of a prohibition is one copy that can quietly go stale. A deploy
 rule lives here or nowhere.
 
+### 7.3 Idle cost
+
+The API scales to zero. `backend/fly.toml` sets `auto_stop_machines = "stop"` and
+`min_machines_running = 0`, so an idle deployment bills for rootfs storage rather than for a
+machine running around the clock, and the first request after an idle period pays a few seconds
+of cold start. The `smoke` job tolerates that already — its ~50s retry budget was written for a
+machine that is still coming up. The reasoning, and what to reverse if this app ever needs to be
+warm, is in the comment above those keys.
+
+The `worker` is in no service, so nothing autostops it and nothing would wake it. Its count is
+set by hand (`fly scale count worker=1`), and a worker scaled to zero — or left stopped — leaves
+runs sitting in `pending` with no consumer. That failure is quiet: the worker has no health
+check to go red (§7.1).
+
 ---
 
 ## 8. Frontend conventions

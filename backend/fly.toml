@@ -95,12 +95,31 @@ kill_timeout = "240s"
   # rather than by a flag, which is the stronger guarantee.
   processes = ["app"]
 
-  # The API must answer the deploy's smoke check the moment the deploy returns, so it does
-  # not scale to zero. `auto_start_machines` stays on as a safety net rather than as a
-  # scaling strategy. Both apply to the `app` process alone, per the key above.
-  auto_stop_machines = "off"
+  # THE API SCALES TO ZERO, AND `auto_start_machines` IS THE SCALING STRATEGY RATHER THAN A
+  # SAFETY NET. These three keys read `off` / `true` / `1` until this change, on the stated
+  # argument that the API "must answer the deploy's smoke check the moment the deploy
+  # returns". That argument does not survive reading the check it appeals to. The `smoke`
+  # job in .github/workflows/deploy-backend.yml curls `/health` with `--retry 10
+  # --retry-delay 5 --retry-all-errors --retry-connrefused` — a ~50s budget whose own
+  # comment says it is written to tolerate "a machine that is still coming up", which
+  # answers 502. The Fly proxy starts a stopped machine on the inbound request, so the
+  # first curl wakes this one and a later retry reads the body. The check was already
+  # cold-start tolerant; only the comment above it assumed otherwise.
+  #
+  # WHAT IT COSTS. The first request after an idle period waits out a cold start — a few
+  # seconds, because the lifespan opens three connections before uvicorn serves anything,
+  # which is the same window `grace_period` below is sized for. WHAT IT BUYS: an idle
+  # deployment bills for rootfs storage instead of for a machine running around the clock.
+  # That trade is the whole point, and it is a deliberate posture rather than a default
+  # nobody looked at — reverse all three keys together if this app ever needs to be warm.
+  #
+  # All three apply to the `app` process alone, per the `processes` key above. The worker is
+  # untouched by them for the structural reason given there: it is in no service, so nothing
+  # autostops it and nothing would wake it if something did. Its count is set by hand with
+  # `fly scale count worker=1`.
+  auto_stop_machines = "stop"
   auto_start_machines = true
-  min_machines_running = 1
+  min_machines_running = 0
 
 # THE FLY-SIDE HEALTH CHECK. Inherits `processes = ["app"]` from the service above, so it
 # is never applied to the worker.
